@@ -12,6 +12,13 @@ Before the first operation, follow the `palmate-setup` skill. If `palmate` is
 missing or unauthenticated, run the bundled bootstrap, wait for browser login,
 and automatically resume the original operation after installation completes.
 
+- Run every `palmate` command that can contact the Palmate host with network
+  access enabled. In a sandboxed shell, request network permission before
+  executing it even though the command line contains no URL; the CLI resolves
+  its HTTPS origin from its protected credential store.
+- If a networked command reports `backend_unavailable` and it was run without
+  network permission, retry it once with network access instead of reporting a
+  backend outage.
 - Download a server branch before editing with `palmate checkout BRANCH`.
 - Inspect local state with `palmate status` and `palmate diff`.
 - Publish a complete change set with `palmate commit -m "..."`.

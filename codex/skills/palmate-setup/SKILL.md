@@ -15,7 +15,8 @@ python3 <plugin-root>/scripts/bootstrap_palmate.py --host <https-origin> --check
 If that check exits nonzero, this plugin has not completed first-use setup:
 
 1. Tell the user that a Palmate browser login is opening.
-2. Run the bootstrap with the user's Palmate HTTPS origin:
+2. Run the bootstrap with network access enabled and the user's Palmate HTTPS
+   origin:
 
    ```text
    python3 <plugin-root>/scripts/bootstrap_palmate.py --host <https-origin>
@@ -26,6 +27,12 @@ If that check exits nonzero, this plugin has not completed first-use setup:
    to paste a password, access token, refresh token, or browser cookie.
 4. After setup succeeds, run `palmate auth status --json`.
 5. Resume the user's original Palmate operation automatically.
+
+The `--check` operation is local and does not need network access. The
+bootstrap without `--check`, and every later `palmate` operation that contacts
+the host, must run in a network-enabled shell context. Sandboxed agents must
+request network permission explicitly because ordinary CLI commands obtain the
+host from the credential store rather than showing it in their arguments.
 
 Do not treat an unrelated preinstalled `palmate` executable as completed plugin
 setup. Only the bootstrap's non-secret completion marker may skip first-use

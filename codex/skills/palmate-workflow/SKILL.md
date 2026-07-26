@@ -10,6 +10,13 @@ Before the first CLI operation, follow the `palmate-setup` skill. If setup is
 required, resume the original operation automatically after browser login and
 installation complete.
 
+- Run every `palmate` command that can contact the Palmate host with network
+  access enabled. In a sandboxed shell, request network permission before
+  executing it even though the command line contains no URL; the CLI resolves
+  its HTTPS origin from its protected credential store.
+- If a networked command reports `backend_unavailable` and it was run without
+  network permission, retry it once with network access instead of reporting a
+  backend outage.
 - Pull or download a server branch before editing with `palmate checkout BRANCH`.
 - Inspect local state with `palmate status` and `palmate diff`.
 - Publish a complete change set with `palmate commit -m "..."`.
