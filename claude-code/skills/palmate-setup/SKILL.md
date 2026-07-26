@@ -21,8 +21,9 @@ If that check exits nonzero, this plugin has not completed first-use setup:
    python3 <plugin-root>/scripts/bootstrap_palmate.py --host <https-origin>
    ```
 
-3. Wait while the user completes browser login. Never ask the user to paste a
-   token, password, authorization code, or browser cookie.
+3. Show the short one-time code printed by the bootstrap and wait while the
+   user logs in and approves that same code in the browser. Never ask the user
+   to paste a password, access token, refresh token, or browser cookie.
 4. After setup succeeds, run `palmate auth status --json`.
 5. Resume the user's original Palmate operation automatically.
 
@@ -30,7 +31,8 @@ Do not treat an unrelated preinstalled `palmate` executable as completed plugin
 setup. Only the bootstrap's non-secret completion marker may skip first-use
 login and download.
 
-The bootstrap owns PKCE, the loopback callback, authenticated download,
-checksum verification, atomic installation, and credential initialization.
-Never reproduce those steps with `curl`, direct HTTP calls, or shell parsing.
-Never read or display the Palmate credential file.
+The bootstrap owns the port-free OAuth device flow, polling, authenticated
+download, checksum verification, atomic installation, and credential
+initialization. It never opens a localhost callback port. Never reproduce
+those steps with `curl`, direct HTTP calls, or shell parsing. Never read or
+display the Palmate credential file.

@@ -1,31 +1,28 @@
 #!/usr/bin/env python3
-"""First-use Palmate bootstrap for Codex.
+"""Port-free first-use Palmate bootstrap.
 
-Uses browser OAuth PKCE, downloads the authenticated CLI release, verifies its
-digest, installs it atomically, and delegates credential persistence to the
-newly installed CLI package. Tokens are never printed or passed as arguments.
+Uses OAuth device authorization, downloads the authenticated CLI release,
+verifies its digest, installs it atomically, and delegates credential storage
+to the installed CLI. Durable tokens are never displayed or passed as args.
 """
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
-import http.server
 import json
 import os
-import secrets
 import stat
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
 
-CALLBACK_HOST = "127.0.0.1"
-CALLBACK_PORT = 18271
-CALLBACK_PATH = "/callback"
+CLIENT_ID = "palmate-cli-device"
+DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 MAX_JSON_BYTES = 64 * 1024
 MAX_CLI_BYTES = 128 * 1024 * 1024
 
@@ -122,6 +119,18 @@ def request_json(
     token: str | None = None,
     form: dict[str, str] | None = None,
 ) -> dict:
+    response_status, value = request_json_result(url, token=token, form=form)
+    if response_status >= 400:
+        raise BootstrapError("Palmate authentication or release request failed")
+    return value
+
+
+def request_json_result(
+    url: str,
+    *,
+    token: str | None = None,
+    form: dict[str, str] | None = None,
+) -> tuple[int, dict]:
     headers = {"Accept": "application/json"}
     body = None
     if token:
@@ -133,111 +142,80 @@ def request_json(
     try:
         with OPENER.open(request, timeout=30) as response:
             value = json.loads(read_response(response, MAX_JSON_BYTES))
+            response_status = response.status
+    except urllib.error.HTTPError as exc:
+        try:
+            value = json.loads(read_response(exc, MAX_JSON_BYTES))
+        except (OSError, json.JSONDecodeError) as parse_exc:
+            raise BootstrapError("Palmate returned an invalid error response") from parse_exc
+        response_status = exc.code
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise BootstrapError("Palmate authentication or release request failed") from exc
     if not isinstance(value, dict):
         raise BootstrapError("Palmate returned invalid JSON")
-    return value
-
-
-class CallbackHandler(http.server.BaseHTTPRequestHandler):
-    expected_state = ""
-    code: str | None = None
-    error: str | None = None
-
-    def do_GET(self):
-        parsed = urllib.parse.urlsplit(self.path)
-        values = urllib.parse.parse_qs(parsed.query)
-        state = values.get("state", [""])[0]
-        if (
-            parsed.path != CALLBACK_PATH
-            or not state
-            or not secrets.compare_digest(state, self.expected_state)
-        ):
-            self.error = "OAuth callback validation failed"
-            self.send_response(400)
-            self.end_headers()
-            return
-        if values.get("error"):
-            self.error = "Login was not completed"
-            self.send_response(400)
-            self.end_headers()
-            return
-        self.code = values.get("code", [None])[0]
-        if not self.code:
-            self.error = "OAuth callback did not contain a code"
-            self.send_response(400)
-            self.end_headers()
-            return
-        body = (
-            b"<!doctype html><meta charset=utf-8>"
-            b"<title>Palmate login complete</title>"
-            b"<h1>Login complete</h1><p>You can close this window.</p>"
-        )
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Content-Security-Policy", "default-src 'none'")
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format, *args):
-        return
+    return response_status, value
 
 
 def oauth_login(host: str) -> tuple[str, str]:
-    state = secrets.token_urlsafe(32)
-    verifier = secrets.token_urlsafe(64)
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode("ascii")).digest()
-    ).rstrip(b"=").decode("ascii")
-    callback = f"http://localhost:{CALLBACK_PORT}{CALLBACK_PATH}"
-    CallbackHandler.expected_state = state
-    CallbackHandler.code = None
-    CallbackHandler.error = None
-
-    query = urllib.parse.urlencode(
-        {
-            "response_type": "code",
-            "redirect_uri": callback,
-            "client_id": "palmate-cli",
-            "state": state,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-        }
+    authorization = request_json(
+        f"{host}/api/palmate-cli/device/authorize/",
+        form={"client_id": CLIENT_ID, "scope": "read write"},
     )
-    authorize_url = f"{host}/api/o/authorize/?{query}"
-    try:
-        server = http.server.HTTPServer((CALLBACK_HOST, CALLBACK_PORT), CallbackHandler)
-    except OSError as exc:
-        raise BootstrapError(
-            f"Cannot bind OAuth callback port {CALLBACK_PORT}; close the process using it and retry"
-        ) from exc
-    server.timeout = 180
-    print("Opening Palmate login in your browser…", flush=True)
-    if not webbrowser.open(authorize_url):
-        print(f"Open this URL to continue:\n{authorize_url}", flush=True)
-    server.handle_request()
-    server.server_close()
-    if not CallbackHandler.code:
-        raise BootstrapError(CallbackHandler.error or "Timed out waiting for Palmate login")
-
-    tokens = request_json(
-        f"{host}/api/o/token/",
-        form={
-            "grant_type": "authorization_code",
-            "code": CallbackHandler.code,
-            "redirect_uri": callback,
-            "client_id": "palmate-cli",
-            "code_verifier": verifier,
-        },
+    device_code = str(authorization.get("device_code", ""))
+    user_code = str(authorization.get("user_code", ""))
+    verification_url = str(authorization.get("verification_uri", ""))
+    complete_url = str(
+        authorization.get("verification_uri_complete", verification_url)
     )
-    access = str(tokens.get("access_token", ""))
-    refresh = str(tokens.get("refresh_token", ""))
-    if not access:
-        raise BootstrapError("Palmate did not issue an access token")
-    return access, refresh
+    expires_in = authorization.get("expires_in")
+    interval = authorization.get("interval", 5)
+    if (
+        len(device_code) < 24
+        or not 4 <= len(user_code) <= 16
+        or not isinstance(expires_in, int)
+        or not 30 <= expires_in <= 1800
+        or not isinstance(interval, int)
+        or not 1 <= interval <= 30
+        or not same_origin(host, verification_url)
+        or not same_origin(host, complete_url)
+    ):
+        raise BootstrapError("Palmate returned invalid device authorization metadata")
+
+    print("Opening Palmate login in your browser.", flush=True)
+    print(f"One-time code: {user_code}", flush=True)
+    print("The browser receives no CLI credential; approve only this code.", flush=True)
+    if not webbrowser.open(complete_url):
+        print(f"Open this URL to continue:\n{complete_url}", flush=True)
+
+    deadline = time.monotonic() + expires_in
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        response_status, tokens = request_json_result(
+            f"{host}/api/palmate-cli/device/token/",
+            form={
+                "grant_type": DEVICE_GRANT_TYPE,
+                "device_code": device_code,
+                "client_id": CLIENT_ID,
+            },
+        )
+        error = str(tokens.get("error", ""))
+        if response_status == 200:
+            access = str(tokens.get("access_token", ""))
+            refresh = str(tokens.get("refresh_token", ""))
+            if not access or not refresh:
+                raise BootstrapError("Palmate did not issue renewable credentials")
+            return access, refresh
+        if error == "authorization_pending":
+            continue
+        if error == "slow_down":
+            interval = min(interval + 5, 30)
+            continue
+        if error == "access_denied":
+            raise BootstrapError("Palmate login was denied")
+        if error == "expired_token":
+            raise BootstrapError("Palmate login code expired; run setup again")
+        raise BootstrapError("Palmate device authentication failed")
+    raise BootstrapError("Palmate login code expired; run setup again")
 
 
 def download_cli(host: str, access_token: str, destination: Path) -> Path:
@@ -314,7 +292,7 @@ def persist_with_installed_cli(
             access_token,
             refresh_token,
             auth_mode="oauth",
-            client_id="palmate-cli",
+            client_id=CLIENT_ID,
             make_default=True,
         )
     except Exception as exc:
