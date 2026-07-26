@@ -1,21 +1,20 @@
 {
   "name": "palmate-agent-codex",
-  "version": "0.4.0+codex.20260726093000",
-  "description": "Palmate Codex adapter for customer MCP and explicit CLI branch workflows.",
+  "version": "0.4.1+codex.20260726100000",
+  "description": "Install, authenticate, and use the Palmate CLI from Codex.",
   "author": {
     "name": "Palmate"
   },
   "skills": "./skills/",
-  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Palmate for Codex",
-    "shortDescription": "Manage Palmate agents safely from Codex.",
-    "longDescription": "Use browser-based first-use setup, the governed Palmate MCP for customer operations, and the authenticated CLI for explicit branch engineering.",
+    "shortDescription": "Install and use Palmate safely from Codex.",
+    "longDescription": "Open browser login on first use, download the protected Palmate CLI, and use that authenticated CLI for Palmate workflows.",
     "developerName": "Palmate",
     "category": "Productivity",
     "defaultPrompt": [
-      "Inspect my Palmate agent and summarize its current state.",
-      "Create and follow a governed Palmate change request."
+      "Log in to Palmate and list my projects.",
+      "Check out a Palmate branch and inspect its status."
     ],
     "capabilities": [
       "Interactive",

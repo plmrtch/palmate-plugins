@@ -1,6 +1,6 @@
 ---
 name: palmate-workflow
-description: "Use the Palmate CLI only for explicit local/server-branch engineering work: checkout, local diff, commit, revision testing, and merge-request creation. Do not trigger for customer conversations about inspecting or changing a managed Palmate agent/project, agent settings/content, or reports; those belong to the palmate-mcp skill and configured MCP tools."
+description: "Use the authenticated Palmate CLI for project discovery, checkout, local diff, commit, revision testing, training, reports, and merge-request creation."
 ---
 
 # Palmate workflow
@@ -9,11 +9,6 @@ Use the installed `palmate` executable and explicit project/branch context.
 Before the first CLI operation, follow the `palmate-setup` skill. If setup is
 required, resume the original operation automatically after browser login and
 installation complete.
-
-Route first: if the user is talking about a managed customer agent or project,
-including behavior, persona, popup, bot name, RAG, functions, utilities, or
-reports, stop and use the `palmate-mcp` skill. Do not inspect or edit a local
-repository and do not invoke this CLI workflow for that request.
 
 - Pull or download a server branch before editing with `palmate checkout BRANCH`.
 - Inspect local state with `palmate status` and `palmate diff`.

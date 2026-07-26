@@ -5,22 +5,30 @@ description: Install and authenticate the Palmate CLI on first use. Trigger befo
 
 # Palmate first-use setup
 
-Before a Palmate CLI action, run `palmate auth status --json`.
+Before every Palmate CLI action, resolve `../../scripts/bootstrap_palmate.py`
+relative to this `SKILL.md` and run:
 
-If `palmate` is missing or reports that it is unauthenticated:
+```text
+python3 <plugin-root>/scripts/bootstrap_palmate.py --host <https-origin> --check
+```
+
+If that check exits nonzero, this plugin has not completed first-use setup:
 
 1. Tell the user that a Palmate browser login is opening.
-2. Resolve `../../scripts/bootstrap_palmate.py` relative to this `SKILL.md`.
-3. Run it with the user's Palmate HTTPS origin:
+2. Run the bootstrap with the user's Palmate HTTPS origin:
 
    ```text
    python3 <plugin-root>/scripts/bootstrap_palmate.py --host <https-origin>
    ```
 
-4. Wait while the user completes browser login. Never ask the user to paste a
+3. Wait while the user completes browser login. Never ask the user to paste a
    token, password, authorization code, or browser cookie.
-5. After setup succeeds, run `palmate auth status --json`.
-6. Resume the user's original Palmate operation automatically.
+4. After setup succeeds, run `palmate auth status --json`.
+5. Resume the user's original Palmate operation automatically.
+
+Do not treat an unrelated preinstalled `palmate` executable as completed plugin
+setup. Only the bootstrap's non-secret completion marker may skip first-use
+login and download.
 
 The bootstrap owns PKCE, the loopback callback, authenticated download,
 checksum verification, atomic installation, and credential initialization.

@@ -10,10 +10,9 @@ This directory is a publishable marketplace root for both supported hosts:
 - Codex reads `.agents/plugins/marketplace.json` and installs
   `palmate-agent-codex` from `codex/`.
 
-The plugins are deliberately thin. They do not contain Palmate request/response
-models, credentials, internal API schemas, or a general backend client. Runtime
-MCP tool schemas are supplied by the authenticated server, and branch
-engineering is delegated to the installed `palmate` CLI.
+The plugins are deliberately thin. They contain no MCP server, Palmate
+request/response models, credentials, internal API schemas, or general backend
+client. Every Palmate operation is delegated to the installed `palmate` CLI.
 
 Installing a plugin does not authorize an account. Authentication remains
 interactive and CLI-owned, and server authorization is checked on every

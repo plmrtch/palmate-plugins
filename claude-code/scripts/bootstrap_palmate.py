@@ -34,6 +34,38 @@ class BootstrapError(Exception):
     pass
 
 
+def marker_path() -> Path:
+    configured = os.environ.get("PALMATE_HOME")
+    root = Path(configured).expanduser() if configured else Path.home() / ".palmate"
+    return root / "plugin-bootstrap.json"
+
+
+def setup_complete(host: str) -> bool:
+    try:
+        value = json.loads(marker_path().read_text(encoding="utf-8"))
+        cli = Path(value["cli"]).expanduser()
+        return value.get("host") == host and cli.is_file() and os.access(cli, os.X_OK)
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def save_marker(host: str, cli: Path) -> None:
+    path = marker_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".plugin-bootstrap.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump({"host": host, "cli": str(cli)}, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def normalized_host(value: str) -> str:
     parsed = urllib.parse.urlsplit(str(value).strip().rstrip("/"))
     if (
@@ -300,12 +332,20 @@ def main() -> int:
         type=Path,
         default=Path.home() / ".local" / "bin" / "palmate",
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Exit successfully only when plugin bootstrap already completed.",
+    )
     args = parser.parse_args()
     try:
         host = normalized_host(args.host)
+        if args.check:
+            return 0 if setup_complete(host) else 1
         access, refresh = oauth_login(host)
         cli = download_cli(host, access, args.destination.expanduser())
         persist_with_installed_cli(cli, host, access, refresh)
+        save_marker(host, cli)
     except BootstrapError as exc:
         print(f"Palmate setup failed: {exc}", file=sys.stderr)
         return 1
