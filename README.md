@@ -16,8 +16,9 @@ client. Every Palmate operation is delegated to the installed `palmate` CLI.
 
 Installing a plugin does not authorize an account. Authentication remains
 interactive and CLI-owned, and server authorization is checked on every
-operation. On first use, the bundled bootstrap opens browser OAuth with PKCE,
-downloads the protected CLI release, verifies its size and SHA-256 digest,
+operation. On first use, the bundled bootstrap opens browser device
+authorization, downloads the protected CLI release, verifies its size,
+SHA-256 digest, and RSA signature against a pinned Palmate release key,
 installs it atomically, lets the installed CLI store credentials, and resumes
 the requested operation.
 

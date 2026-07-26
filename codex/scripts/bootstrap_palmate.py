@@ -8,9 +8,12 @@ to the installed CLI. Durable tokens are never displayed or passed as args.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import os
+import secrets
 import stat
 import sys
 import tempfile
@@ -25,10 +28,56 @@ CLIENT_ID = "palmate-cli-device"
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 MAX_JSON_BYTES = 64 * 1024
 MAX_CLI_BYTES = 128 * 1024 * 1024
+SIGNATURE_ALGORITHM = "rsa-pkcs1v15-sha256"
+SIGNING_KEY_ID = "00046399fc0ed330"
+SIGNING_PUBLIC_EXPONENT = 65537
+SIGNING_PUBLIC_MODULUS = int(
+    "aa7e785c94aff298eaac355e5fe3d3e8e375c7c32d78ca391549f9c8a901434"
+    "a3342fad7746aec3d3db615afcfbbb07aea88d05c1cebbbe42f388326378545bb"
+    "97c515f5c7408d5e60395b202688019c2fae62bb00e5d64e66bcc84ebf114251"
+    "e4f5746b5aff69e6c2db038d9ac00f874f5fcf18f938aa3fa04c09c326e426b"
+    "6b4619b724f4832adb873dcc44e002829c121e3cbabbcc2dc39fedae0183bc2d"
+    "ae10d93bc4deaeb441d6dd7d3e1ee2340754a6de50901d906ca48fa728e67241"
+    "83ec45aa8a74221e3930c6382c11b020fed0e954d06965cf7c628d7d1ff04a64"
+    "e1081762cf808ce46eed77f68b6a8d0de1dfad7b4c1a77a1c610ea4376e7b0c"
+    "e56590694996acb9a0568b62eb5f452301a105cda14d6ae7c19e1d3e47a9892"
+    "2844516a1e2eee9942175df50952c6ad9c12a2a79513e50cb91bd92fa7d08da"
+    "989d2972627d2e976c7dd7e6924c863bd7ee1290678b7d376e32a33815c59575"
+    "7a3bd43f864589fe4d349ac8315289df3f21e11b077ec716c7ae9f0e29edeaed"
+    "6caf",
+    16,
+)
+SHA256_DIGEST_INFO_PREFIX = bytes.fromhex(
+    "3031300d060960864801650304020105000420"
+)
 
 
 class BootstrapError(Exception):
     pass
+
+
+def verify_release_signature(digest_hex: str, signature_b64: str) -> bool:
+    """Verify the release using the public key pinned in this plugin."""
+    try:
+        digest = bytes.fromhex(digest_hex)
+        signature = base64.b64decode(signature_b64, validate=True)
+    except (ValueError, binascii.Error):
+        return False
+    key_size = (SIGNING_PUBLIC_MODULUS.bit_length() + 7) // 8
+    if len(digest) != hashlib.sha256().digest_size or len(signature) != key_size:
+        return False
+    signature_value = int.from_bytes(signature, "big")
+    if signature_value >= SIGNING_PUBLIC_MODULUS:
+        return False
+    encoded = pow(
+        signature_value,
+        SIGNING_PUBLIC_EXPONENT,
+        SIGNING_PUBLIC_MODULUS,
+    ).to_bytes(key_size, "big")
+    digest_info = SHA256_DIGEST_INFO_PREFIX + digest
+    padding_size = key_size - len(digest_info) - 3
+    expected = b"\x00\x01" + (b"\xff" * padding_size) + b"\x00" + digest_info
+    return padding_size >= 8 and secrets.compare_digest(encoded, expected)
 
 
 def marker_path() -> Path:
@@ -226,15 +275,20 @@ def download_cli(host: str, access_token: str, destination: Path) -> Path:
     url = str(metadata.get("download_url", ""))
     expected = str(metadata.get("sha256", "")).lower()
     declared_size = metadata.get("size")
+    signature = str(metadata.get("signature", ""))
     if (
         not url
         or not same_origin(host, url)
         or urllib.parse.urlsplit(url).scheme != "https"
         or metadata.get("algorithm") != "sha256"
         or len(expected) != 64
+        or any(character not in "0123456789abcdef" for character in expected)
         or not isinstance(declared_size, int)
         or declared_size < 1
         or declared_size > MAX_CLI_BYTES
+        or metadata.get("signature_algorithm") != SIGNATURE_ALGORITHM
+        or metadata.get("signing_key_id") != SIGNING_KEY_ID
+        or not signature
     ):
         raise BootstrapError("Palmate returned invalid CLI release metadata")
 
@@ -267,8 +321,14 @@ def download_cli(host: str, access_token: str, destination: Path) -> Path:
                 output.write(chunk)
             output.flush()
             os.fsync(output.fileno())
-        if total != declared_size or digest.hexdigest() != expected:
-            raise BootstrapError("Downloaded CLI failed size or checksum verification")
+        if (
+            total != declared_size
+            or digest.hexdigest() != expected
+            or not verify_release_signature(expected, signature)
+        ):
+            raise BootstrapError(
+                "Downloaded CLI failed size, checksum, or signature verification"
+            )
         os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
         os.replace(temporary, destination)
     finally:
@@ -310,10 +370,16 @@ def main() -> int:
         type=Path,
         default=Path.home() / ".local" / "bin" / "palmate",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--check",
         action="store_true",
         help="Exit successfully only when plugin bootstrap already completed.",
+    )
+    mode.add_argument(
+        "--update",
+        action="store_true",
+        help="Re-authenticate and replace the installed CLI with the signed server release.",
     )
     args = parser.parse_args()
     try:
@@ -327,7 +393,8 @@ def main() -> int:
     except BootstrapError as exc:
         print(f"Palmate setup failed: {exc}", file=sys.stderr)
         return 1
-    print(f"Palmate is installed and authenticated: {cli}")
+    action = "updated" if args.update else "installed"
+    print(f"Palmate is {action} and authenticated: {cli}")
     if str(cli.parent) not in os.environ.get("PATH", "").split(os.pathsep):
         print(f"Add {cli.parent} to PATH, then retry the original Palmate action.")
     else:
