@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "palmate": {
+      "type": "http",
+      "url": "https://harezmi.palmate.net/api/palmate-mcp/mcp/",
+      "bearer_token_env_var": "PALMATE_ACCESS_TOKEN"
+    }
+  }
+}

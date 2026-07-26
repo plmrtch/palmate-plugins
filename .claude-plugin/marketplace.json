@@ -1,0 +1,20 @@
+{
+  "name": "palmate",
+  "description": "Official Palmate integrations for coding agents.",
+  "owner": {
+    "name": "Palmate"
+  },
+  "plugins": [
+    {
+      "name": "palmate-agent",
+      "source": "./claude-code",
+      "version": "0.4.1",
+      "category": "development",
+      "tags": [
+        "agents",
+        "automation",
+        "palmate"
+      ]
+    }
+  ]
+}
