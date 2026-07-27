@@ -5,6 +5,17 @@ description: Install, authenticate, or update the Palmate CLI. Trigger before a 
 
 # Palmate first-use setup
 
+## Host selection
+
+Resolve the host before every setup command:
+
+- If the user explicitly mentions a host, use that exact HTTPS Palmate origin.
+- If the user does not mention a host, use `https://api.palmate.ai`.
+
+Do not stop to ask for a host when none was mentioned. Always pass the resolved
+host to the bootstrap with `--host`; the bootstrap intentionally has no default
+because developers commonly switch between development, test, and production.
+
 ## User-requested update
 
 When the user asks to update, upgrade, refresh, or reinstall Palmate CLI, do
@@ -12,7 +23,7 @@ not use `--check` to skip the operation. Tell the user that browser approval
 may be required, then run:
 
 ```text
-python3 <plugin-root>/scripts/bootstrap_palmate.py --host <https-origin> --update
+python3 <plugin-root>/scripts/bootstrap_palmate.py --host <resolved-https-origin> --update
 ```
 
 Let the authenticated download finish without interruption. Then run
@@ -25,7 +36,7 @@ Before every Palmate CLI action, resolve `../../scripts/bootstrap_palmate.py`
 relative to this `SKILL.md` and run:
 
 ```text
-python3 <plugin-root>/scripts/bootstrap_palmate.py --host <https-origin> --check
+python3 <plugin-root>/scripts/bootstrap_palmate.py --host <resolved-https-origin> --check
 ```
 
 If that check exits nonzero, this plugin has not completed first-use setup:
@@ -35,7 +46,7 @@ If that check exits nonzero, this plugin has not completed first-use setup:
    origin:
 
    ```text
-   python3 <plugin-root>/scripts/bootstrap_palmate.py --host <https-origin>
+   python3 <plugin-root>/scripts/bootstrap_palmate.py --host <resolved-https-origin>
    ```
 
 3. Show the short one-time code printed by the bootstrap and wait while the

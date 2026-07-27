@@ -7,14 +7,17 @@ binary.
 
 Choose your coding agent below and complete every step in order.
 
-Before starting, identify your Palmate HTTPS address. It is the address where
-you normally sign in to Palmate, such as:
+If you do not mention a host in your request, both plugins select:
 
 ```text
-https://example.palmate.net
+https://api.palmate.ai
 ```
 
-The Palmate address is not this GitHub repository URL.
+The LLM passes that selected host explicitly to the setup script. The script
+itself intentionally requires `--host`, allowing developers to switch safely
+between development, test, and production. Provide a host in your prompt when
+you want anything other than `https://api.palmate.ai`. A custom Palmate
+address is not this GitHub repository URL.
 
 ## Install and log in with Codex
 
@@ -31,13 +34,17 @@ Restart Codex after installation so it loads the Palmate skills.
 
 ### 2. Tell Codex to start Palmate login
 
-Open Codex and send this prompt, replacing the example Palmate address:
+Open Codex and send this prompt:
 
 ```text
-Set up and log in to Palmate at https://YOUR-PALMATE-HOST. Show me the
-one-time login code, wait for me to approve it in my browser, verify that
-Palmate is installed and authenticated, and then list my Palmate projects.
+Set up and log in to Palmate. Show me the one-time login code, wait for me to
+approve it in my browser, verify that Palmate is installed and authenticated,
+and then list my Palmate projects.
 ```
+
+Because that prompt does not name a host, Codex uses
+`https://api.palmate.ai`. To use another Palmate installation, say
+`Set up and log in to Palmate at https://YOUR-PALMATE-HOST` instead.
 
 Codex will check whether Palmate setup is already complete. On first use it
 will run the plugin's bootstrap and tell you that browser approval is needed.
@@ -101,14 +108,17 @@ Restart Claude Code after installation so it loads the Palmate skills.
 
 ### 2. Tell Claude Code to start Palmate login
 
-Open Claude Code and send this prompt, replacing the example Palmate address:
+Open Claude Code and send this prompt:
 
 ```text
-Use the Palmate plugin. Set up and log in to Palmate at
-https://YOUR-PALMATE-HOST. Show me the one-time login code, wait for me to
-approve it in my browser, verify that Palmate is installed and authenticated,
-and then list my Palmate projects.
+Use the Palmate plugin. Set up and log in to Palmate. Show me the one-time
+login code, wait for me to approve it in my browser, verify that Palmate is
+installed and authenticated, and then list my Palmate projects.
 ```
+
+Because that prompt does not name a host, Claude Code uses
+`https://api.palmate.ai`. To use another Palmate installation, say
+`Set up and log in to Palmate at https://YOUR-PALMATE-HOST` instead.
 
 Claude Code will check whether Palmate setup is already complete. On first use
 it will run the plugin's bootstrap and tell you that browser approval is
