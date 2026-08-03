@@ -58,6 +58,7 @@ SEMVER_PATTERN = re.compile(
 )
 SESSION_ENVIRONMENT_KEYS = (
     "CODEX_THREAD_ID",
+    "CLAUDE_CODE_REMOTE_SESSION_ID",
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_SESSION_ID",
 )
@@ -646,7 +647,7 @@ def main() -> int:
             current_agent_session(args.session_id),
             version,
         )
-    except BootstrapError as exc:
+    except (BootstrapError, OSError) as exc:
         print(f"Palmate setup failed: {exc}", file=sys.stderr)
         return 1
     action = "updated" if args.update else "installed"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -14,6 +16,16 @@ CODEX_SKILL = ROOT / "codex" / "skills" / "palmate-setup"
 CLAUDE_SKILL = ROOT / "claude-code" / "skills" / "palmate-setup"
 CODEX_BOOTSTRAP = CODEX_SKILL / "scripts" / "bootstrap_palmate.py"
 CLAUDE_BOOTSTRAP = CLAUDE_SKILL / "scripts" / "bootstrap_palmate.py"
+SIGNED_COMPLETE_CLI = (
+    "dzIFp9DPMXknK87j1r05bLWEGO11m9uOtBw/KwpudivI1SP+82L6ol8FYgA2hj+hu"
+    "VejnxCY+1cIBdkU6yCwvPsaRRwB8+277IlImkLoorvMPpRw0WpQoPgT3TVyaRX34G"
+    "O4xJVhX9ReeyQO4Z9auB2jHN/Ih/3euVHf14biAAzH7kAxVRraKdWet2qtGezSmTT"
+    "/p1jcPyzYF2kMtRQRaRqOqUmR+TmTKQxmDwBOsJkk91yewCG1Bj4NuGIT69fXI0G"
+    "Y0Xxe3joTvB5NkizLzJVFHr/94stW4ZlzQAqOethBJ4XhmN6twC8AlNPsV5B2NPgJ"
+    "EZFOa8d8vVZqxiH3jcXUdpGjg1t+Ak21aA/m0r0rF3CopoMQztbVjfzkagND4zCxT"
+    "CZCIlEqrgAmU47KLbOPLJrSufCFYoI+m8JyeDj1Yn8dYrqzy7Bz0NeE/4Wk8ds7Zi"
+    "Ilb5gRjql76R+USIxxmmWk4N9FoxRZQxsAwos4wPOB9RG2ELOeA8yub7zz"
+)
 
 
 def load_bootstrap():
@@ -45,6 +57,16 @@ class SemanticVersionTests(unittest.TestCase):
             bootstrap.compare_semver("1.2", "1.2.3")
 
 
+class SignatureVerificationTests(unittest.TestCase):
+    def test_pinned_key_accepts_known_release_signature(self):
+        digest = hashlib.sha256(b"complete-cli").hexdigest()
+        self.assertTrue(bootstrap.verify_release_signature(digest, SIGNED_COMPLETE_CLI))
+
+    def test_pinned_key_rejects_signature_for_different_digest(self):
+        digest = hashlib.sha256(b"tampered-cli").hexdigest()
+        self.assertFalse(bootstrap.verify_release_signature(digest, SIGNED_COMPLETE_CLI))
+
+
 class SessionUpdateTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="palmate-plugin-test-")
@@ -59,6 +81,7 @@ class SessionUpdateTests(unittest.TestCase):
             {
                 "PALMATE_HOME": str(self.root / "state"),
                 "CODEX_THREAD_ID": "thread-secret-value",
+                "CLAUDE_CODE_REMOTE_SESSION_ID": "",
                 "CLAUDE_CODE_SESSION_ID": "",
                 "CLAUDE_SESSION_ID": "",
             },
@@ -141,6 +164,121 @@ class SessionUpdateTests(unittest.TestCase):
 
         self.assertEqual(result, "current")
         self.assertEqual(metadata.call_count, 2)
+
+    def test_claude_remote_session_is_checked_only_once(self):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_THREAD_ID": "",
+                    "CLAUDE_CODE_REMOTE_SESSION_ID": "remote-session-secret",
+                },
+            ),
+            patch.object(
+                bootstrap,
+                "installed_release_metadata",
+                return_value=("1.2.3", "opaque-token", self.metadata("1.2.3")),
+            ) as metadata,
+        ):
+            first = bootstrap.check_for_session_update(self.host, self.cli)
+            second = bootstrap.check_for_session_update(self.host, self.cli)
+
+        self.assertEqual(first, "current")
+        self.assertEqual(second, "already_checked")
+        metadata.assert_called_once_with(self.host, self.cli)
+        self.assertNotIn(
+            "remote-session-secret",
+            bootstrap.marker_path().read_text(encoding="utf-8"),
+        )
+
+    def test_release_metadata_retries_once_with_refreshed_credentials(self):
+        with (
+            patch.object(
+                bootstrap,
+                "installed_cli_identity",
+                side_effect=[("1.2.3", "expired"), ("1.2.3", "refreshed")],
+            ) as identity,
+            patch.object(
+                bootstrap,
+                "request_json_result",
+                side_effect=[(401, {}), (200, self.metadata("1.2.4"))],
+            ) as request,
+        ):
+            result = bootstrap.installed_release_metadata(self.host, self.cli)
+
+        self.assertEqual(result, ("1.2.3", "refreshed", self.metadata("1.2.4")))
+        self.assertEqual(identity.call_count, 2)
+        identity.assert_any_call(self.cli, self.host)
+        identity.assert_any_call(self.cli, self.host, refresh=True)
+        self.assertEqual(request.call_count, 2)
+
+
+class BinaryReplacementTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="palmate-download-test-")
+        self.destination = Path(self.temporary.name) / "bin" / "palmate"
+        self.destination.parent.mkdir(parents=True)
+        self.destination.write_bytes(b"known-good-cli")
+        self.destination.chmod(0o700)
+        self.host = "https://api.palmate.ai"
+        self.payload = b"new-signed-palmate-cli"
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def metadata(self, *, digest: str | None = None) -> dict:
+        return {
+            "download_url": f"{self.host}/api/palmate-cli/download/",
+            "version": "1.3.0",
+            "sha256": digest or hashlib.sha256(self.payload).hexdigest(),
+            "size": len(self.payload),
+            "algorithm": "sha256",
+            "signature": "test-signature",
+            "signature_algorithm": bootstrap.SIGNATURE_ALGORITHM,
+            "signing_key_id": bootstrap.SIGNING_KEY_ID,
+        }
+
+    def test_verified_download_atomically_replaces_binary(self):
+        with (
+            patch.object(
+                bootstrap.OPENER,
+                "open",
+                return_value=io.BytesIO(self.payload),
+            ) as opened,
+            patch.object(bootstrap, "verify_release_signature", return_value=True),
+        ):
+            result = bootstrap.download_cli(
+                self.host,
+                "opaque-token",
+                self.destination,
+                metadata=self.metadata(),
+            )
+
+        self.assertEqual(result, self.destination)
+        self.assertEqual(self.destination.read_bytes(), self.payload)
+        self.assertEqual(self.destination.stat().st_mode & 0o777, 0o700)
+        request = opened.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer opaque-token")
+
+    def test_checksum_failure_preserves_known_good_binary(self):
+        with (
+            patch.object(
+                bootstrap.OPENER,
+                "open",
+                return_value=io.BytesIO(self.payload),
+            ),
+            patch.object(bootstrap, "verify_release_signature", return_value=True),
+        ):
+            with self.assertRaises(bootstrap.BootstrapError):
+                bootstrap.download_cli(
+                    self.host,
+                    "opaque-token",
+                    self.destination,
+                    metadata=self.metadata(digest="0" * 64),
+                )
+
+        self.assertEqual(self.destination.read_bytes(), b"known-good-cli")
+        self.assertEqual(list(self.destination.parent.glob(".palmate.*")), [])
 
 
 class AdapterParityTests(unittest.TestCase):

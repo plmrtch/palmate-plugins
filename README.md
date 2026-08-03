@@ -199,7 +199,7 @@ Upload `palmate-workflow` as a second skill ZIP when Chat should also perform
 project discovery, checkout, diff, commit, test, and merge-request workflows.
 
 For an organization marketplace managed by manual upload, use
-`dist/palmate-agent-claude-0.5.1.zip`. Uploading the same `palmate-agent` plugin
+`dist/palmate-agent-claude-0.5.2.zip`. Uploading the same `palmate-agent` plugin
 name replaces the previous version; deleting it first is unnecessary. For a
 GitHub-synced marketplace, an Owner must trigger **Update** after a direct push.
 
