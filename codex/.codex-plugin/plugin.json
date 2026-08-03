@@ -1,6 +1,6 @@
 {
   "name": "palmate-agent-codex",
-  "version": "0.4.1+codex.20260727050334",
+  "version": "0.5.1+codex.20260803210257",
   "description": "Install, authenticate, and use the Palmate CLI from Codex.",
   "author": {
     "name": "Palmate"

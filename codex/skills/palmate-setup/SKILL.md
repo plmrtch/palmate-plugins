@@ -23,30 +23,37 @@ not use `--check` to skip the operation. Tell the user that browser approval
 may be required, then run:
 
 ```text
-python3 <plugin-root>/scripts/bootstrap_palmate.py --host <resolved-https-origin> --update
+python3 <skill-dir>/scripts/bootstrap_palmate.py --host <resolved-https-origin> --update
 ```
 
 Let the authenticated download finish without interruption. Then run
 `palmate --version` and report the installed version. The update is complete
 only after checksum and pinned-signature verification succeeds.
 
-## First-use check
+## First operation in an agent session
 
-Before every Palmate CLI action, resolve `../../scripts/bootstrap_palmate.py`
-relative to this `SKILL.md` and run:
+Before the first Palmate CLI action in the current coding-agent session, resolve
+`scripts/bootstrap_palmate.py` relative to this `SKILL.md` and run:
 
 ```text
-python3 <plugin-root>/scripts/bootstrap_palmate.py --host <resolved-https-origin> --check
+python3 <skill-dir>/scripts/bootstrap_palmate.py --host <resolved-https-origin> --check
 ```
 
-If that check exits nonzero, this plugin has not completed first-use setup:
+For an installed and authenticated CLI, this performs at most one remote version
+check per coding-agent session. If the signed remote semantic version is newer,
+the bootstrap downloads it with the existing credentials, verifies its size,
+SHA-256 digest, and pinned RSA signature, and atomically replaces the binary.
+Equal, older, invalid, or unverifiable releases never replace the known-good
+binary. A failed version check warns and allows the installed CLI to continue.
+
+If the check exits nonzero, this plugin has not completed first-use setup:
 
 1. Tell the user that a Palmate browser login is opening.
 2. Run the bootstrap with network access enabled and the user's Palmate HTTPS
    origin:
 
    ```text
-   python3 <plugin-root>/scripts/bootstrap_palmate.py --host <resolved-https-origin>
+   python3 <skill-dir>/scripts/bootstrap_palmate.py --host <resolved-https-origin>
    ```
 
 3. Show the short one-time code printed by the bootstrap and wait while the
@@ -55,11 +62,17 @@ If that check exits nonzero, this plugin has not completed first-use setup:
 4. After setup succeeds, run `palmate auth status --json`.
 5. Resume the user's original Palmate operation automatically.
 
-The `--check` operation is local and does not need network access. The
-bootstrap without `--check`, and every later `palmate` operation that contacts
-the host, must run in a network-enabled shell context. Sandboxed agents must
-request network permission explicitly because ordinary CLI commands obtain the
-host from the credential store rather than showing it in their arguments.
+The first `--check` in a session, the bootstrap without `--check`, and every
+later `palmate` operation that contacts the host must run in a network-enabled
+shell context. Sandboxed agents must request network permission explicitly
+because ordinary CLI commands obtain the host from the credential store rather
+than showing it in their arguments.
+
+If Claude Cowork reports a proxy tunnel `403 Forbidden`, do not retry or change
+Palmate hosts. Tell a Team/Enterprise owner to allow the selected hostname under
+Organization settings > Capabilities > Code execution, then tell the user to
+start a new Cowork conversation because egress changes do not affect an
+existing session. A skill cannot grant its own network access.
 
 Do not treat an unrelated preinstalled `palmate` executable as completed plugin
 setup. Only the bootstrap's non-secret completion marker may skip first-use

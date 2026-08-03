@@ -19,6 +19,12 @@ between development, test, and production. Provide a host in your prompt when
 you want anything other than `https://api.palmate.ai`. A custom Palmate
 address is not this GitHub repository URL.
 
+On the first Palmate operation in each coding-agent session, the setup skill
+checks the authenticated release metadata. It downloads and atomically installs
+the CLI only when the signed remote semantic version is newer. The existing
+binary remains in place when the version is equal, older, invalid, or the check
+cannot be completed.
+
 ## Install and log in with Codex
 
 ### 1. Install the Codex plugin
@@ -168,6 +174,48 @@ To check the installation later, tell Claude Code:
 Check my Palmate authentication status for https://YOUR-PALMATE-HOST and show
 the installed Palmate CLI version.
 ```
+
+## Use the setup skill in Claude Chat and Cowork
+
+The Claude setup skill is self-contained at
+`claude-code/skills/palmate-setup/`: its `scripts/bootstrap_palmate.py` travels
+with `SKILL.md` when the skill is imported independently.
+
+For Claude Chat, upload the complete skill as a ZIP; do not upload `SKILL.md`
+by itself. The archive must have this structure:
+
+```text
+palmate-setup.zip
+└── palmate-setup/
+    ├── SKILL.md
+    └── scripts/
+        └── bootstrap_palmate.py
+```
+
+Open **Customize > Skills**, remove the incomplete Palmate skill, choose
+**+ Create skill > Upload a skill**, upload the ZIP, and enable it. The same
+uploaded skill is then available in both Chat and Cowork for that account.
+Upload `palmate-workflow` as a second skill ZIP when Chat should also perform
+project discovery, checkout, diff, commit, test, and merge-request workflows.
+
+Cowork code execution must be allowed to reach the selected Palmate hostname.
+For Team and Enterprise organizations, an Owner should:
+
+1. Open **Organization settings > Capabilities**.
+2. Under **Code execution**, enable network egress to package managers and
+   specific domains.
+3. Add the exact Palmate hostname, such as `harezmi.palmate.net`.
+4. Start a new Cowork conversation after saving the change. Existing sessions
+   retain the network policy they started with.
+
+If the bootstrap reports `Tunnel connection failed: 403 Forbidden`, this
+allowlist has not taken effect in that session. Retrying with elevated shell
+permission or switching between `*.palmate.net` hosts cannot bypass Cowork's
+egress proxy. A skill cannot add its own allowed domain.
+
+See Anthropic's [Cowork network access
+guidance](https://support.claude.com/en/articles/13455879-use-claude-cowork-on-team-and-enterprise-plans)
+for the current organization settings.
 
 ## Start working after login
 

@@ -6,9 +6,10 @@ description: "Use the authenticated Palmate CLI for project discovery, checkout,
 # Palmate workflow
 
 Use the installed `palmate` executable and explicit project/branch context.
-Before the first CLI operation, follow the `palmate-setup` skill. If setup is
-required, resume the original operation automatically after browser login and
-installation complete.
+Before the first CLI operation in the current coding-agent session, follow the
+`palmate-setup` skill. This checks once for a newer signed CLI release. If setup
+is required, resume the original operation automatically after browser login
+and installation complete.
 
 - Run every `palmate` command that can contact the Palmate host with network
   access enabled. In a sandboxed shell, request network permission before

@@ -13,6 +13,7 @@ import binascii
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
 import sys
@@ -50,6 +51,17 @@ SIGNING_PUBLIC_MODULUS = int(
 SHA256_DIGEST_INFO_PREFIX = bytes.fromhex(
     "3031300d060960864801650304020105000420"
 )
+SEMVER_PATTERN = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+SESSION_ENVIRONMENT_KEYS = (
+    "CODEX_THREAD_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_SESSION_ID",
+)
+MAX_RECORDED_SESSION_CHECKS = 32
 
 
 class BootstrapError(Exception):
@@ -86,23 +98,104 @@ def marker_path() -> Path:
     return root / "plugin-bootstrap.json"
 
 
-def setup_complete(host: str) -> bool:
+def load_marker() -> dict:
     try:
         value = json.loads(marker_path().read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, TypeError, json.JSONDecodeError):
+        return {}
+
+
+def installed_cli_path(host: str) -> Path | None:
+    value = load_marker()
+    try:
         cli = Path(value["cli"]).expanduser()
-        return value.get("host") == host and cli.is_file() and os.access(cli, os.X_OK)
-    except (OSError, KeyError, TypeError, json.JSONDecodeError):
-        return False
+    except (KeyError, TypeError):
+        return None
+    if value.get("host") != host or not cli.is_file() or not os.access(cli, os.X_OK):
+        return None
+    return cli
+
+
+def setup_complete(host: str) -> bool:
+    return installed_cli_path(host) is not None
 
 
 def save_marker(host: str, cli: Path) -> None:
     path = marker_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    value = load_marker()
+    value.update({"host": host, "cli": str(cli)})
     descriptor, temporary_name = tempfile.mkstemp(prefix=".plugin-bootstrap.", dir=path.parent)
     temporary = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            json.dump({"host": host, "cli": str(cli)}, output)
+            json.dump(value, output, sort_keys=True)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def current_agent_session(explicit: str | None = None) -> str | None:
+    """Return a stable, non-secret coding-agent session identity when exposed."""
+    if explicit and explicit.strip():
+        return f"explicit:{explicit.strip()}"
+    for key in SESSION_ENVIRONMENT_KEYS:
+        value = os.environ.get(key, "").strip()
+        if value:
+            return f"{key}:{value}"
+    return None
+
+
+def session_check_key(host: str, session: str) -> str:
+    return hashlib.sha256(f"{host}\0{session}".encode("utf-8")).hexdigest()
+
+
+def session_was_checked(host: str, session: str | None) -> bool:
+    if not session:
+        return False
+    checks = load_marker().get("version_checks")
+    return isinstance(checks, dict) and session_check_key(host, session) in checks
+
+
+def record_session_check(
+    host: str,
+    cli: Path,
+    session: str | None,
+    version: str,
+) -> None:
+    """Record only a hash of the host/session pair and keep the marker bounded."""
+    save_marker(host, cli)
+    if not session:
+        return
+    path = marker_path()
+    value = load_marker()
+    checks = value.get("version_checks")
+    if not isinstance(checks, dict):
+        checks = {}
+    checks[session_check_key(host, session)] = {
+        "checked_at": int(time.time()),
+        "version": version,
+    }
+    if len(checks) > MAX_RECORDED_SESSION_CHECKS:
+        oldest = sorted(
+            checks,
+            key=lambda key: int((checks.get(key) or {}).get("checked_at", 0)),
+        )[: len(checks) - MAX_RECORDED_SESSION_CHECKS]
+        for key in oldest:
+            checks.pop(key, None)
+    value["version_checks"] = checks
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".plugin-bootstrap.", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(value, output, sort_keys=True)
             output.flush()
             os.fsync(output.fileno())
         os.chmod(temporary, 0o600)
@@ -205,6 +298,98 @@ def request_json_result(
     return response_status, value
 
 
+def parse_semver(value: str) -> tuple[tuple[int, int, int], tuple[str, ...] | None]:
+    match = SEMVER_PATTERN.fullmatch(str(value).strip())
+    if not match:
+        raise BootstrapError("Palmate returned an invalid CLI semantic version")
+    prerelease = tuple(match.group(4).split(".")) if match.group(4) else None
+    if prerelease and any(
+        identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0")
+        for identifier in prerelease
+    ):
+        raise BootstrapError("Palmate returned an invalid CLI semantic version")
+    return tuple(int(match.group(index)) for index in (1, 2, 3)), prerelease
+
+
+def compare_semver(left: str, right: str) -> int:
+    """Compare two strict SemVer values, ignoring build metadata."""
+    left_core, left_pre = parse_semver(left)
+    right_core, right_pre = parse_semver(right)
+    if left_core != right_core:
+        return -1 if left_core < right_core else 1
+    if left_pre == right_pre:
+        return 0
+    if left_pre is None:
+        return 1
+    if right_pre is None:
+        return -1
+    for left_part, right_part in zip(left_pre, right_pre):
+        if left_part == right_part:
+            continue
+        left_numeric = left_part.isdigit()
+        right_numeric = right_part.isdigit()
+        if left_numeric and right_numeric:
+            return -1 if int(left_part) < int(right_part) else 1
+        if left_numeric != right_numeric:
+            return -1 if left_numeric else 1
+        return -1 if left_part < right_part else 1
+    return -1 if len(left_pre) < len(right_pre) else 1
+
+
+def installed_cli_identity(
+    cli: Path,
+    host: str,
+    *,
+    refresh: bool = False,
+) -> tuple[str, str]:
+    """Ask the installed CLI's credential authority for its version and token."""
+    sys.path.insert(0, str(cli))
+    try:
+        from palmate_cli._version import CLI_VERSION
+        from palmate_cli.auth.credentials import load_credentials
+
+        credentials = load_credentials(host) or {}
+        token = str(credentials.get("access_token", ""))
+        if refresh and token:
+            from palmate_cli.http.auth import refresh_access_token
+
+            refreshed = refresh_access_token(
+                base_url=host,
+                current_token=token,
+                user_agent=f"palmate/{CLI_VERSION}",
+            )
+            if refreshed:
+                token = str(refreshed[0])
+        if not token:
+            raise BootstrapError("installed Palmate CLI is not authenticated")
+        return str(CLI_VERSION), token
+    except BootstrapError:
+        raise
+    except Exception as exc:
+        raise BootstrapError(
+            "installed Palmate CLI credential authority is unavailable"
+        ) from exc
+    finally:
+        sys.path.pop(0)
+
+
+def installed_release_metadata(host: str, cli: Path) -> tuple[str, str, dict]:
+    installed_version, token = installed_cli_identity(cli, host)
+    status, metadata = request_json_result(
+        f"{host}/api/palmate-cli/release/",
+        token=token,
+    )
+    if status == 401:
+        installed_version, token = installed_cli_identity(cli, host, refresh=True)
+        status, metadata = request_json_result(
+            f"{host}/api/palmate-cli/release/",
+            token=token,
+        )
+    if status >= 400:
+        raise BootstrapError("Palmate CLI release version check failed")
+    return installed_version, token, metadata
+
+
 def oauth_login(host: str) -> tuple[str, str]:
     authorization = request_json(
         f"{host}/api/palmate-cli/device/authorize/",
@@ -267,12 +452,18 @@ def oauth_login(host: str) -> tuple[str, str]:
     raise BootstrapError("Palmate login code expired; run setup again")
 
 
-def download_cli(host: str, access_token: str, destination: Path) -> Path:
-    metadata = request_json(
-        f"{host}/api/palmate-cli/release/",
-        token=access_token,
+def download_cli(
+    host: str,
+    access_token: str,
+    destination: Path,
+    *,
+    metadata: dict | None = None,
+) -> Path:
+    metadata = metadata or request_json(
+        f"{host}/api/palmate-cli/release/", token=access_token
     )
     url = str(metadata.get("download_url", ""))
+    remote_version = str(metadata.get("version", ""))
     expected = str(metadata.get("sha256", "")).lower()
     declared_size = metadata.get("size")
     signature = str(metadata.get("signature", ""))
@@ -291,6 +482,7 @@ def download_cli(host: str, access_token: str, destination: Path) -> Path:
         or not signature
     ):
         raise BootstrapError("Palmate returned invalid CLI release metadata")
+    parse_semver(remote_version)
 
     request = urllib.request.Request(
         url,
@@ -362,6 +554,52 @@ def persist_with_installed_cli(
         sys.path.pop(0)
 
 
+def check_for_session_update(
+    host: str,
+    cli: Path,
+    *,
+    session: str | None = None,
+) -> str:
+    """Check once per exposed agent session and install only a newer release."""
+    session = current_agent_session(session)
+    if session_was_checked(host, session):
+        return "already_checked"
+
+    installed_version = "unknown"
+    try:
+        installed_version, token, metadata = installed_release_metadata(host, cli)
+        remote_version = str(metadata.get("version", ""))
+        comparison = compare_semver(installed_version, remote_version)
+        if comparison < 0:
+            previous_version = installed_version
+            download_cli(host, token, cli, metadata=metadata)
+            installed_version = remote_version
+            print(
+                f"Palmate CLI updated from {previous_version} "
+                f"to {remote_version} for this coding-agent session.",
+                flush=True,
+            )
+            result = "updated"
+        else:
+            result = "current"
+    except (BootstrapError, OSError) as exc:
+        print(
+            f"Palmate CLI version check skipped; using the installed binary: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        result = "skipped"
+    try:
+        record_session_check(host, cli, session, installed_version)
+    except OSError as exc:
+        print(
+            f"Palmate CLI session marker could not be saved: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Install and authenticate Palmate")
     parser.add_argument("--host", required=True, help="HTTPS Palmate origin")
@@ -370,11 +608,15 @@ def main() -> int:
         type=Path,
         default=Path.home() / ".local" / "bin" / "palmate",
     )
+    parser.add_argument(
+        "--session-id",
+        help="Optional stable coding-agent session ID; the raw value is never stored.",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--check",
         action="store_true",
-        help="Exit successfully only when plugin bootstrap already completed.",
+        help="Verify setup and check once per coding-agent session for a newer CLI.",
     )
     mode.add_argument(
         "--update",
@@ -385,11 +627,25 @@ def main() -> int:
     try:
         host = normalized_host(args.host)
         if args.check:
-            return 0 if setup_complete(host) else 1
+            cli = installed_cli_path(host)
+            if cli is None:
+                return 1
+            check_for_session_update(host, cli, session=args.session_id)
+            return 0
         access, refresh = oauth_login(host)
         cli = download_cli(host, access, args.destination.expanduser())
         persist_with_installed_cli(cli, host, access, refresh)
         save_marker(host, cli)
+        try:
+            version, _ = installed_cli_identity(cli, host)
+        except BootstrapError:
+            version = "unknown"
+        record_session_check(
+            host,
+            cli,
+            current_agent_session(args.session_id),
+            version,
+        )
     except BootstrapError as exc:
         print(f"Palmate setup failed: {exc}", file=sys.stderr)
         return 1

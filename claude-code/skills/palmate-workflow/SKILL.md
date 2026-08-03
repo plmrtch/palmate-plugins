@@ -8,9 +8,11 @@ description: Use the Palmate CLI for explicit server-branch checkout, local diff
 Use only the installed `palmate` executable. The CLI owns authentication,
 transport, authorization, and credentials.
 
-Before the first operation, follow the `palmate-setup` skill. If `palmate` is
-missing or unauthenticated, run the bundled bootstrap, wait for browser login,
-and automatically resume the original operation after installation completes.
+Before the first operation in the current coding-agent session, follow the
+`palmate-setup` skill. This checks once for a newer signed CLI release. If
+`palmate` is missing or unauthenticated, run the bundled bootstrap, wait for
+browser login, and automatically resume the original operation after
+installation completes.
 
 - Run every `palmate` command that can contact the Palmate host with network
   access enabled. In a sandboxed shell, request network permission before
