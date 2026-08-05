@@ -281,6 +281,131 @@ class BinaryReplacementTests(unittest.TestCase):
         self.assertEqual(list(self.destination.parent.glob(".palmate.*")), [])
 
 
+class ResumableDeviceLoginTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="palmate-login-test-")
+        self.root = Path(self.temporary.name)
+        self.environment = patch.dict(
+            os.environ, {"PALMATE_HOME": str(self.root / "state")}, clear=False,
+        )
+        self.environment.start()
+        self.host = "https://api.palmate.ai"
+        self.destination = self.root / "bin" / "palmate"
+        self.authorization = {
+            "device_code": "d" * 32,
+            "user_code": "ABCD-EFGH",
+            "verification_uri": f"{self.host}/device",
+            "verification_uri_complete": f"{self.host}/device?user_code=ABCD-EFGH",
+            "expires_in": 600,
+            "interval": 5,
+        }
+
+    def tearDown(self):
+        self.environment.stop()
+        self.temporary.cleanup()
+
+    def start(self, *, now=1000):
+        with patch.object(bootstrap, "request_json", return_value=self.authorization):
+            return bootstrap.start_device_login(
+                self.host, self.destination, open_browser=False, now=now,
+            )
+
+    def test_start_persists_before_exit_and_reuses_the_live_code(self):
+        with patch.object(
+            bootstrap, "request_json", return_value=self.authorization,
+        ) as request:
+            first = bootstrap.start_device_login(
+                self.host, self.destination, open_browser=False, now=1000,
+            )
+            second = bootstrap.start_device_login(
+                self.host, self.destination, open_browser=False, now=1001,
+            )
+
+        self.assertEqual(first["status"], "pending")
+        self.assertTrue(second["reused"])
+        request.assert_called_once()
+        path = bootstrap.login_state_path()
+        stored = json.loads(path.read_text(encoding="utf-8"))["logins"][self.host]
+        self.assertEqual(stored["device_code"], "d" * 32)
+        self.assertNotIn("device_code", first)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_status_returns_without_polling_before_interval(self):
+        self.start()
+        with patch.object(bootstrap, "request_json_result") as request:
+            value = bootstrap.device_login_status(self.host, now=1001)
+        self.assertEqual(value["status"], "pending")
+        self.assertEqual(value["next_poll_in"], 4)
+        request.assert_not_called()
+
+    def test_network_failure_keeps_the_grant_resumable(self):
+        self.start()
+        with patch.object(
+            bootstrap,
+            "request_json_result",
+            side_effect=bootstrap.BootstrapError("network unavailable"),
+        ):
+            value = bootstrap.device_login_status(self.host, now=1005)
+        self.assertEqual(value["status"], "pending")
+        self.assertIn("network unavailable", value["last_error"])
+        stored = json.loads(
+            bootstrap.login_state_path().read_text(encoding="utf-8")
+        )["logins"][self.host]
+        self.assertEqual(stored["device_code"], "d" * 32)
+
+    def test_approval_installs_and_scrubs_all_temporary_secrets(self):
+        self.start()
+        self.destination.parent.mkdir(parents=True)
+        self.destination.write_bytes(b"cli")
+        self.destination.chmod(0o700)
+        with (
+            patch.object(
+                bootstrap,
+                "request_json_result",
+                return_value=(200, {"access_token": "access", "refresh_token": "refresh"}),
+            ),
+            patch.object(bootstrap, "download_cli", return_value=self.destination),
+            patch.object(bootstrap, "persist_with_installed_cli"),
+            patch.object(bootstrap, "save_marker"),
+            patch.object(bootstrap, "installed_cli_identity", return_value=("0.5.1", "access")),
+            patch.object(bootstrap, "record_session_check"),
+        ):
+            value = bootstrap.device_login_status(self.host, now=1005)
+
+        self.assertEqual(value["status"], "approved")
+        state_text = bootstrap.login_state_path().read_text(encoding="utf-8")
+        stored = json.loads(state_text)["logins"][self.host]
+        self.assertNotIn("device_code", stored)
+        self.assertNotIn("access_token", stored)
+        self.assertNotIn("refresh_token", stored)
+        self.assertNotIn("access", state_text)
+        self.assertNotIn("refresh", state_text)
+
+    def test_download_failure_can_be_retried_without_reapproval(self):
+        self.start()
+        with (
+            patch.object(
+                bootstrap,
+                "request_json_result",
+                return_value=(200, {"access_token": "access", "refresh_token": "refresh"}),
+            ) as request,
+            patch.object(
+                bootstrap, "download_cli",
+                side_effect=bootstrap.BootstrapError("download disconnected"),
+            ),
+        ):
+            first = bootstrap.device_login_status(self.host, now=1005)
+
+        self.assertEqual(first["status"], "pending")
+        self.assertEqual(first["phase"], "installing")
+        stored = json.loads(
+            bootstrap.login_state_path().read_text(encoding="utf-8")
+        )["logins"][self.host]
+        self.assertEqual(stored["status"], "authorized")
+        self.assertEqual(stored["access_token"], "access")
+        request.assert_called_once()
+
+
 class AdapterParityTests(unittest.TestCase):
     def test_each_setup_skill_is_self_contained(self):
         for skill, legacy_script in (

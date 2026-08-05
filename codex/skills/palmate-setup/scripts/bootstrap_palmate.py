@@ -23,6 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+from datetime import datetime, timezone
 from pathlib import Path
 
 CLIENT_ID = "palmate-cli-device"
@@ -139,6 +140,80 @@ def save_marker(host: str, cli: Path) -> None:
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def login_state_path() -> Path:
+    configured = os.environ.get("PALMATE_HOME")
+    root = Path(configured).expanduser() if configured else Path.home() / ".palmate"
+    return root / "login-state.json"
+
+
+def load_login_store() -> dict:
+    try:
+        value = json.loads(login_state_path().read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"version": 1, "logins": {}}
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        raise BootstrapError(f"durable Palmate login state is unreadable: {exc}") from exc
+    if not isinstance(value, dict) or not isinstance(value.get("logins"), dict):
+        raise BootstrapError("durable Palmate login state has an invalid format")
+    return {"version": 1, "logins": value["logins"]}
+
+
+def save_login_state(state: dict) -> dict:
+    path = login_state_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    store = load_login_store()
+    store["logins"][state["host"]] = state
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".login-state.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(store, output, indent=2, sort_keys=True)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return state
+
+
+def load_login_state(host: str) -> dict | None:
+    value = load_login_store()["logins"].get(host)
+    if not isinstance(value, dict) or value.get("client") != "plugin-bootstrap":
+        return None
+    return value
+
+
+def public_login_state(state: dict, *, now: float | None = None) -> dict:
+    now = time.time() if now is None else now
+    internal_status = state.get("status")
+    status_value = "pending" if internal_status == "authorized" else internal_status
+    result = {
+        "host": state["host"],
+        "status": status_value,
+        "phase": "installing" if internal_status == "authorized" else "approval",
+        "reused": bool(state.get("reused")),
+    }
+    for key in ("user_code", "verification_uri", "verification_uri_complete", "interval", "last_error"):
+        if state.get(key) not in (None, ""):
+            result[key] = state[key]
+    expires_at = state.get("expires_at")
+    if isinstance(expires_at, (int, float)):
+        result["expires_at"] = datetime.fromtimestamp(
+            expires_at, tz=timezone.utc
+        ).isoformat()
+        result["expires_in"] = max(0, int(expires_at - now))
+    next_poll_at = state.get("next_poll_at")
+    if internal_status == "pending" and isinstance(next_poll_at, (int, float)):
+        result["next_poll_in"] = max(0, int(next_poll_at - now))
+    if state.get("cli"):
+        result["cli"] = state["cli"]
+    return result
 
 
 def current_agent_session(explicit: str | None = None) -> str | None:
@@ -453,6 +528,181 @@ def oauth_login(host: str) -> tuple[str, str]:
     raise BootstrapError("Palmate login code expired; run setup again")
 
 
+def start_device_login(
+    host: str,
+    destination: Path,
+    *,
+    session: str | None = None,
+    update: bool = False,
+    force_new: bool = False,
+    open_browser: bool = True,
+    now: float | None = None,
+) -> dict:
+    """Create or redisplay a durable authorization and return immediately."""
+    now = time.time() if now is None else now
+    existing = load_login_state(host)
+    if (
+        not force_new
+        and existing
+        and existing.get("status") in {"pending", "authorized"}
+        and (
+            existing.get("status") == "authorized"
+            or existing.get("expires_at", 0) > now
+        )
+    ):
+        existing.update(reused=True, updated_at=now)
+        save_login_state(existing)
+        if open_browser and existing.get("status") == "pending":
+            webbrowser.open(str(existing["verification_uri_complete"]))
+        return public_login_state(existing, now=now)
+
+    authorization = request_json(
+        f"{host}/api/palmate-cli/device/authorize/",
+        form={"client_id": CLIENT_ID, "scope": "read write"},
+    )
+    device_code = str(authorization.get("device_code", ""))
+    user_code = str(authorization.get("user_code", ""))
+    verification_url = str(authorization.get("verification_uri", ""))
+    complete_url = str(authorization.get("verification_uri_complete", verification_url))
+    expires_in = authorization.get("expires_in")
+    interval = authorization.get("interval", 5)
+    if (
+        len(device_code) < 24
+        or not 4 <= len(user_code) <= 16
+        or not isinstance(expires_in, int)
+        or not 30 <= expires_in <= 1800
+        or not isinstance(interval, int)
+        or not 1 <= interval <= 30
+        or not same_origin(host, verification_url)
+        or not same_origin(host, complete_url)
+    ):
+        raise BootstrapError("Palmate returned invalid device authorization metadata")
+    state = {
+        "client": "plugin-bootstrap",
+        "host": host,
+        "status": "pending",
+        "device_code": device_code,
+        "user_code": user_code,
+        "verification_uri": verification_url,
+        "verification_uri_complete": complete_url,
+        "expires_at": now + expires_in,
+        "interval": interval,
+        "next_poll_at": now + interval,
+        "destination": str(destination.expanduser()),
+        "session": None,
+        "session_key": (
+            session_check_key(host, current_agent_session(session))
+            if current_agent_session(session)
+            else None
+        ),
+        "update": bool(update),
+        "created_at": now,
+        "updated_at": now,
+        "last_error": "",
+        "reused": False,
+    }
+    save_login_state(state)
+    if open_browser:
+        webbrowser.open(complete_url)
+    return public_login_state(state, now=now)
+
+
+def _complete_device_login(state: dict, *, now: float) -> dict:
+    """Finish an authorized download; durable tokens make this retryable."""
+    try:
+        access = str(state["access_token"])
+        refresh = str(state["refresh_token"])
+        destination = Path(state["destination"]).expanduser()
+        cli = download_cli(state["host"], access, destination)
+        persist_with_installed_cli(cli, state["host"], access, refresh)
+        save_marker(state["host"], cli)
+        try:
+            version, _ = installed_cli_identity(cli, state["host"])
+        except BootstrapError:
+            version = "unknown"
+        record_session_check(state["host"], cli, state.get("session"), version)
+    except (BootstrapError, OSError, KeyError, TypeError) as exc:
+        state.update(updated_at=now, last_error=f"CLI installation can be retried: {exc}")
+        save_login_state(state)
+        return public_login_state(state, now=now)
+    state.update(status="approved", updated_at=now, last_error="", cli=str(cli))
+    for key in ("access_token", "refresh_token", "device_code"):
+        state.pop(key, None)
+    save_login_state(state)
+    return public_login_state(state, now=now)
+
+
+def device_login_status(host: str, *, now: float | None = None) -> dict:
+    """Poll at most once, persist every transition, and return immediately."""
+    now = time.time() if now is None else now
+    state = load_login_state(host)
+    if state is None:
+        raise BootstrapError("no Palmate device login has been started for this host")
+    if state.get("status") == "authorized":
+        return _complete_device_login(state, now=now)
+    if state.get("status") != "pending":
+        return public_login_state(state, now=now)
+    if state.get("expires_at", 0) <= now:
+        state.update(status="expired", updated_at=now, last_error="login code expired")
+        state.pop("device_code", None)
+        return public_login_state(save_login_state(state), now=now)
+    if state.get("next_poll_at", 0) > now:
+        return public_login_state(state, now=now)
+
+    try:
+        response_status, tokens = request_json_result(
+            f"{host}/api/palmate-cli/device/token/",
+            form={
+                "grant_type": DEVICE_GRANT_TYPE,
+                "device_code": str(state["device_code"]),
+                "client_id": CLIENT_ID,
+            },
+        )
+    except BootstrapError as exc:
+        state.update(
+            updated_at=now,
+            next_poll_at=now + int(state["interval"]),
+            last_error=f"temporary status check failed: {exc}",
+        )
+        return public_login_state(save_login_state(state), now=now)
+    error = str(tokens.get("error", ""))
+    if response_status == 200:
+        access = str(tokens.get("access_token", ""))
+        refresh = str(tokens.get("refresh_token", ""))
+        if not access or not refresh:
+            state.update(status="error", updated_at=now, last_error="Palmate did not issue renewable credentials")
+            state.pop("device_code", None)
+            return public_login_state(save_login_state(state), now=now)
+        state.update(
+            status="authorized",
+            updated_at=now,
+            last_error="",
+            access_token=access,
+            refresh_token=refresh,
+        )
+        save_login_state(state)
+        return _complete_device_login(state, now=now)
+    if error == "authorization_pending":
+        state.update(updated_at=now, next_poll_at=now + int(state["interval"]), last_error="")
+    elif error == "slow_down":
+        state["interval"] = min(int(state["interval"]) + 5, 30)
+        state.update(updated_at=now, next_poll_at=now + state["interval"], last_error="server requested slower polling")
+    elif error == "access_denied":
+        state.update(status="denied", updated_at=now, last_error="login was denied")
+        state.pop("device_code", None)
+    elif error == "expired_token":
+        state.update(status="expired", updated_at=now, last_error="login code expired")
+        state.pop("device_code", None)
+    else:
+        state.update(
+            status="error",
+            updated_at=now,
+            last_error=str(tokens.get("error_description") or error or "device authentication failed"),
+        )
+        state.pop("device_code", None)
+    return public_login_state(save_login_state(state), now=now)
+
+
 def download_cli(
     host: str,
     access_token: str,
@@ -601,7 +851,69 @@ def check_for_session_update(
     return result
 
 
-def main() -> int:
+def _emit_login_state(value: dict, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(value, sort_keys=True), flush=True)
+        return
+    if value["status"] == "pending" and value.get("phase") == "approval":
+        label = "Reusing active code" if value.get("reused") else "One-time code"
+        print(f"{label}: {value['user_code']}", flush=True)
+        print(f"Approve it at: {value['verification_uri_complete']}", flush=True)
+        print(f"This code expires at {value['expires_at']}.", flush=True)
+        print("Run this bootstrap's `login status` command after approval.", flush=True)
+    elif value["status"] == "pending":
+        print("Palmate approval succeeded; CLI installation is retryable.", flush=True)
+        if value.get("last_error"):
+            print(value["last_error"], file=sys.stderr, flush=True)
+    elif value["status"] == "approved":
+        print(f"Palmate is installed and authenticated: {value['cli']}", flush=True)
+    else:
+        print(f"Palmate login is {value['status']}.", file=sys.stderr, flush=True)
+        if value.get("last_error"):
+            print(value["last_error"], file=sys.stderr, flush=True)
+
+
+def _run_login_command(argv: list[str]) -> int:
+    if len(argv) < 2 or argv[0] != "login" or argv[1] not in {"start", "status"}:
+        raise BootstrapError("expected `login start` or `login status`")
+    action = argv[1]
+    parser = argparse.ArgumentParser(description=f"Palmate device login {action}")
+    parser.add_argument("--host", required=True, help="HTTPS Palmate origin")
+    parser.add_argument(
+        "--destination", type=Path,
+        default=Path.home() / ".local" / "bin" / "palmate",
+    )
+    parser.add_argument("--session-id")
+    parser.add_argument("--json", action="store_true")
+    if action == "start":
+        parser.add_argument("--update", action="store_true")
+        parser.add_argument("--new", action="store_true")
+        parser.add_argument("--no-browser", action="store_true")
+    args = parser.parse_args(argv[2:])
+    host = normalized_host(args.host)
+    if action == "start":
+        value = start_device_login(
+            host,
+            args.destination,
+            session=args.session_id,
+            update=args.update,
+            force_new=args.new,
+            open_browser=not args.no_browser,
+        )
+    else:
+        value = device_login_status(host)
+    _emit_login_state(value, as_json=args.json)
+    return 1 if value["status"] in {"denied", "expired", "error"} else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["login"]:
+        try:
+            return _run_login_command(argv)
+        except (BootstrapError, OSError) as exc:
+            print(f"Palmate setup failed: {exc}", file=sys.stderr, flush=True)
+            return 1
     parser = argparse.ArgumentParser(description="Install and authenticate Palmate")
     parser.add_argument("--host", required=True, help="HTTPS Palmate origin")
     parser.add_argument(
@@ -624,7 +936,7 @@ def main() -> int:
         action="store_true",
         help="Re-authenticate and replace the installed CLI with the signed server release.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         host = normalized_host(args.host)
         if args.check:
@@ -648,14 +960,14 @@ def main() -> int:
             version,
         )
     except (BootstrapError, OSError) as exc:
-        print(f"Palmate setup failed: {exc}", file=sys.stderr)
+        print(f"Palmate setup failed: {exc}", file=sys.stderr, flush=True)
         return 1
     action = "updated" if args.update else "installed"
-    print(f"Palmate is {action} and authenticated: {cli}")
+    print(f"Palmate is {action} and authenticated: {cli}", flush=True)
     if str(cli.parent) not in os.environ.get("PATH", "").split(os.pathsep):
-        print(f"Add {cli.parent} to PATH, then retry the original Palmate action.")
+        print(f"Add {cli.parent} to PATH, then retry the original Palmate action.", flush=True)
     else:
-        print("Retry the original Palmate action now.")
+        print("Retry the original Palmate action now.", flush=True)
     return 0
 
 

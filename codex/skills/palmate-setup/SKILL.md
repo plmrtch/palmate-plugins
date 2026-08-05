@@ -20,15 +20,38 @@ because developers commonly switch between development, test, and production.
 
 When the user asks to update, upgrade, refresh, or reinstall Palmate CLI, do
 not use `--check` to skip the operation. Tell the user that browser approval
-may be required, then run:
+may be required, then follow the resumable start/status flow below, adding
+`--update` to the start command. After approval, run `palmate --version` and
+report the installed version. The update is complete only after checksum and
+pinned-signature verification succeeds.
+
+## Resumable browser approval
+
+Never run the legacy blocking bootstrap from an agent turn. Start approval with:
 
 ```text
-python3 <skill-dir>/scripts/bootstrap_palmate.py --host <resolved-https-origin> --update
+python3 <skill-dir>/scripts/bootstrap_palmate.py login start --host <resolved-https-origin> --json
 ```
 
-Let the authenticated download finish without interruption. Then run
-`palmate --version` and report the installed version. The update is complete
-only after checksum and pinned-signature verification succeeds.
+For an update, append `--update`. This command persists the device grant to
+`~/.palmate/login-state.json`, prints the code, URL, and expiry, and exits
+immediately. Show those values to the user and end the turn so the browser can
+be approved. Do not keep a foreground process alive and do not start another
+code. An unexpired retry redisplays the same code; use `--new` only when the
+user explicitly asks to replace it.
+
+When the user returns after approval, run one stateless check:
+
+```text
+python3 <skill-dir>/scripts/bootstrap_palmate.py login status --host <resolved-https-origin> --json
+```
+
+If the result is `pending`, show the remaining expiry and wait for the user;
+call status again later. If it is `approved`, run `palmate auth status --json`
+and resume the original operation. Surface `denied`, `expired`, and `error`
+verbatim. A temporary network or download failure remains durable and can be
+retried with the same status command. Never ask for a password, access token,
+refresh token, or browser cookie.
 
 ## First operation in an agent session
 
@@ -48,19 +71,10 @@ binary. A failed version check warns and allows the installed CLI to continue.
 
 If the check exits nonzero, this plugin has not completed first-use setup:
 
-1. Tell the user that a Palmate browser login is opening.
-2. Run the bootstrap with network access enabled and the user's Palmate HTTPS
-   origin:
-
-   ```text
-   python3 <skill-dir>/scripts/bootstrap_palmate.py --host <resolved-https-origin>
-   ```
-
-3. Show the short one-time code printed by the bootstrap and wait while the
-   user logs in and approves that same code in the browser. Never ask the user
-   to paste a password, access token, refresh token, or browser cookie.
-4. After setup succeeds, run `palmate auth status --json`.
-5. Resume the user's original Palmate operation automatically.
+1. Tell the user that Palmate browser approval is starting.
+2. Follow the resumable `login start`/`login status` flow above.
+3. After setup succeeds, run `palmate auth status --json`.
+4. Resume the user's original Palmate operation automatically.
 
 The first `--check` in a session, the bootstrap without `--check`, and every
 later `palmate` operation that contacts the host must run in a network-enabled
@@ -78,8 +92,8 @@ Do not treat an unrelated preinstalled `palmate` executable as completed plugin
 setup. Only the bootstrap's non-secret completion marker may skip first-use
 login and download.
 
-The bootstrap owns the port-free OAuth device flow, polling, authenticated
-download, checksum and pinned-signature verification, atomic installation, and credential
-initialization. It never opens a localhost callback port. Never reproduce
-those steps with `curl`, direct HTTP calls, or shell parsing. Never read or
-display the Palmate credential file.
+The bootstrap owns the port-free OAuth device flow, one-shot status checks,
+authenticated download, checksum and pinned-signature verification, atomic
+installation, and credential initialization. It never opens a localhost
+callback port. Never reproduce those steps with `curl`, direct HTTP calls, or
+shell parsing. Never read or display the Palmate credential file.
