@@ -19,11 +19,13 @@ because developers commonly switch between development, test, and production.
 ## User-requested update
 
 When the user asks to update, upgrade, refresh, or reinstall Palmate CLI, do
-not use `--check` to skip the operation. Tell the user that browser approval
-may be required, then follow the resumable start/status flow below, adding
-`--update` to the start command. After approval, run `palmate --version` and
-report the installed version. The update is complete only after checksum and
-pinned-signature verification succeeds.
+not use `--check` to skip the operation. Follow the resumable start/status flow
+below, adding `--update` to the start command. The bootstrap first reuses the
+stored renewable machine credential, so a CLI release update normally returns
+`approved` immediately without browser interaction. Browser approval is needed
+only when the 14-day machine credential is absent, expired, or revoked. After
+the update, run `palmate --version` and report the installed version. The update
+is complete only after checksum and pinned-signature verification succeeds.
 
 ## Resumable browser approval
 

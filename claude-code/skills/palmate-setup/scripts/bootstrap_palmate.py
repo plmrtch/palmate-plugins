@@ -71,6 +71,10 @@ class BootstrapError(Exception):
     pass
 
 
+class AuthenticationRequired(BootstrapError):
+    """The stored machine credential is absent, expired, or revoked."""
+
+
 def verify_release_signature(digest_hex: str, signature_b64: str) -> bool:
     """Verify the release using the public key pinned in this plugin."""
     try:
@@ -455,7 +459,9 @@ def installed_cli_identity(
             if refreshed:
                 token = str(refreshed[0])
         if not token:
-            raise BootstrapError("installed Palmate CLI is not authenticated")
+            raise AuthenticationRequired(
+                "installed Palmate CLI is not authenticated"
+            )
         return str(CLI_VERSION), token
     except BootstrapError:
         raise
@@ -478,6 +484,10 @@ def installed_release_metadata(host: str, cli: Path) -> tuple[str, str, dict]:
         status, metadata = request_json_result(
             f"{host}/api/palmate-cli/release/",
             token=token,
+        )
+    if status == 401:
+        raise AuthenticationRequired(
+            "stored Palmate machine approval expired or was revoked"
         )
     if status >= 400:
         raise BootstrapError("Palmate CLI release version check failed")
@@ -558,6 +568,13 @@ def start_device_login(
 ) -> dict:
     """Create or redisplay a durable authorization and return immediately."""
     now = time.time() if now is None else now
+    if update and not force_new:
+        try:
+            return update_with_existing_credentials(
+                host, session=session, now=now,
+            )
+        except AuthenticationRequired:
+            pass
     existing = load_login_state(host)
     if (
         not force_new
@@ -893,6 +910,43 @@ def check_for_session_update(
     return result
 
 
+def update_with_existing_credentials(
+    host: str,
+    *,
+    session: str | None = None,
+    now: float | None = None,
+) -> dict:
+    """Update in place while retaining the approved machine credential."""
+    cli = installed_cli_path(host)
+    if cli is None:
+        raise AuthenticationRequired(
+            "Palmate CLI is not installed for this host"
+        )
+    installed_version, token, metadata = installed_release_metadata(host, cli)
+    remote_version = str(metadata.get("version", ""))
+    comparison = compare_semver(installed_version, remote_version)
+    if comparison < 0:
+        download_cli(host, token, cli, metadata=metadata)
+        version = remote_version
+        update_result = "updated"
+    else:
+        version = installed_version
+        update_result = "current"
+    save_marker(host, cli)
+    record_session_check(
+        host, cli, current_agent_session(session), version,
+    )
+    return {
+        "host": host,
+        "status": "approved",
+        "cli": str(cli),
+        "version": version,
+        "update": update_result,
+        "reused_credentials": True,
+        "updated_at": time.time() if now is None else now,
+    }
+
+
 def _emit_login_state(value: dict, *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(value, sort_keys=True), flush=True)
@@ -1002,6 +1056,21 @@ def main(argv: list[str] | None = None) -> int:
                     "ok": True, "host": host, "cli": str(cli),
                     "update_check": result,
                 }, sort_keys=True), flush=True)
+            return 0
+        if args.update:
+            try:
+                value = update_with_existing_credentials(
+                    host, session=args.session_id,
+                )
+            except AuthenticationRequired:
+                value = start_device_login(
+                    host,
+                    args.destination,
+                    session=args.session_id,
+                    update=True,
+                    open_browser=True,
+                )
+            _emit_login_state(value, as_json=args.json)
             return 0
         access, refresh = oauth_login(host)
         cli = download_cli(host, access, args.destination.expanduser())
