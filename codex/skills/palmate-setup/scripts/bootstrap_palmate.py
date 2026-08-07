@@ -64,10 +64,15 @@ SESSION_ENVIRONMENT_KEYS = (
     "CLAUDE_SESSION_ID",
 )
 MAX_RECORDED_SESSION_CHECKS = 32
+MAX_INSTALL_ATTEMPTS = 3
 
 
 class BootstrapError(Exception):
     pass
+
+
+class AuthenticationRequired(BootstrapError):
+    """The stored machine credential is absent, expired, or revoked."""
 
 
 def verify_release_signature(digest_hex: str, signature_b64: str) -> bool:
@@ -108,13 +113,26 @@ def load_marker() -> dict:
         return {}
 
 
+def _marker_hosts(value: dict) -> dict:
+    hosts = value.get("hosts")
+    if isinstance(hosts, dict):
+        return {
+            str(host): row for host, row in hosts.items()
+            if isinstance(row, dict)
+        }
+    host, cli = value.get("host"), value.get("cli")
+    if isinstance(host, str) and isinstance(cli, str):
+        return {host: {"cli": cli}}
+    return {}
+
+
 def installed_cli_path(host: str) -> Path | None:
     value = load_marker()
     try:
-        cli = Path(value["cli"]).expanduser()
+        cli = Path(_marker_hosts(value)[host]["cli"]).expanduser()
     except (KeyError, TypeError):
         return None
-    if value.get("host") != host or not cli.is_file() or not os.access(cli, os.X_OK):
+    if not cli.is_file() or not os.access(cli, os.X_OK):
         return None
     return cli
 
@@ -127,7 +145,11 @@ def save_marker(host: str, cli: Path) -> None:
     path = marker_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     value = load_marker()
-    value.update({"host": host, "cli": str(cli)})
+    hosts = _marker_hosts(value)
+    hosts[host] = {"cli": str(cli)}
+    value.pop("host", None)
+    value.pop("cli", None)
+    value.update({"version": 2, "hosts": hosts})
     descriptor, temporary_name = tempfile.mkstemp(prefix=".plugin-bootstrap.", dir=path.parent)
     temporary = Path(temporary_name)
     try:
@@ -437,7 +459,9 @@ def installed_cli_identity(
             if refreshed:
                 token = str(refreshed[0])
         if not token:
-            raise BootstrapError("installed Palmate CLI is not authenticated")
+            raise AuthenticationRequired(
+                "installed Palmate CLI is not authenticated"
+            )
         return str(CLI_VERSION), token
     except BootstrapError:
         raise
@@ -460,6 +484,10 @@ def installed_release_metadata(host: str, cli: Path) -> tuple[str, str, dict]:
         status, metadata = request_json_result(
             f"{host}/api/palmate-cli/release/",
             token=token,
+        )
+    if status == 401:
+        raise AuthenticationRequired(
+            "stored Palmate machine approval expired or was revoked"
         )
     if status >= 400:
         raise BootstrapError("Palmate CLI release version check failed")
@@ -540,6 +568,13 @@ def start_device_login(
 ) -> dict:
     """Create or redisplay a durable authorization and return immediately."""
     now = time.time() if now is None else now
+    if update and not force_new:
+        try:
+            return update_with_existing_credentials(
+                host, session=session, now=now,
+            )
+        except AuthenticationRequired:
+            pass
     existing = load_login_state(host)
     if (
         not force_new
@@ -599,6 +634,7 @@ def start_device_login(
         "created_at": now,
         "updated_at": now,
         "last_error": "",
+        "install_attempts": 0,
         "reused": False,
     }
     save_login_state(state)
@@ -622,7 +658,26 @@ def _complete_device_login(state: dict, *, now: float) -> dict:
             version = "unknown"
         record_session_check(state["host"], cli, state.get("session"), version)
     except (BootstrapError, OSError, KeyError, TypeError) as exc:
-        state.update(updated_at=now, last_error=f"CLI installation can be retried: {exc}")
+        attempts = int(state.get("install_attempts", 0)) + 1
+        if attempts >= MAX_INSTALL_ATTEMPTS:
+            state.update(
+                status="error", updated_at=now, install_attempts=attempts,
+                last_error=(
+                    f"CLI installation failed after {attempts} attempts: {exc}. "
+                    "Verify that this host publishes a signed CLI release, then "
+                    "start a new login with --new."
+                ),
+            )
+            for key in ("access_token", "refresh_token", "device_code"):
+                state.pop(key, None)
+        else:
+            state.update(
+                updated_at=now, install_attempts=attempts,
+                last_error=(
+                    f"CLI installation can be retried "
+                    f"({attempts}/{MAX_INSTALL_ATTEMPTS}): {exc}"
+                ),
+            )
         save_login_state(state)
         return public_login_state(state, now=now)
     state.update(status="approved", updated_at=now, last_error="", cli=str(cli))
@@ -810,6 +865,7 @@ def check_for_session_update(
     cli: Path,
     *,
     session: str | None = None,
+    emit: bool = True,
 ) -> str:
     """Check once per exposed agent session and install only a newer release."""
     session = current_agent_session(session)
@@ -825,30 +881,70 @@ def check_for_session_update(
             previous_version = installed_version
             download_cli(host, token, cli, metadata=metadata)
             installed_version = remote_version
-            print(
-                f"Palmate CLI updated from {previous_version} "
-                f"to {remote_version} for this coding-agent session.",
-                flush=True,
-            )
+            if emit:
+                print(
+                    f"Palmate CLI updated from {previous_version} "
+                    f"to {remote_version} for this coding-agent session.",
+                    flush=True,
+                )
             result = "updated"
         else:
             result = "current"
     except (BootstrapError, OSError) as exc:
-        print(
-            f"Palmate CLI version check skipped; using the installed binary: {exc}",
-            file=sys.stderr,
-            flush=True,
-        )
+        if emit:
+            print(
+                f"Palmate CLI version check skipped; using the installed binary: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
         result = "skipped"
     try:
         record_session_check(host, cli, session, installed_version)
     except OSError as exc:
-        print(
-            f"Palmate CLI session marker could not be saved: {exc}",
-            file=sys.stderr,
-            flush=True,
-        )
+        if emit:
+            print(
+                f"Palmate CLI session marker could not be saved: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
     return result
+
+
+def update_with_existing_credentials(
+    host: str,
+    *,
+    session: str | None = None,
+    now: float | None = None,
+) -> dict:
+    """Update in place while retaining the approved machine credential."""
+    cli = installed_cli_path(host)
+    if cli is None:
+        raise AuthenticationRequired(
+            "Palmate CLI is not installed for this host"
+        )
+    installed_version, token, metadata = installed_release_metadata(host, cli)
+    remote_version = str(metadata.get("version", ""))
+    comparison = compare_semver(installed_version, remote_version)
+    if comparison < 0:
+        download_cli(host, token, cli, metadata=metadata)
+        version = remote_version
+        update_result = "updated"
+    else:
+        version = installed_version
+        update_result = "current"
+    save_marker(host, cli)
+    record_session_check(
+        host, cli, current_agent_session(session), version,
+    )
+    return {
+        "host": host,
+        "status": "approved",
+        "cli": str(cli),
+        "version": version,
+        "update": update_result,
+        "reused_credentials": True,
+        "updated_at": time.time() if now is None else now,
+    }
 
 
 def _emit_login_state(value: dict, *, as_json: bool) -> None:
@@ -925,6 +1021,7 @@ def main(argv: list[str] | None = None) -> int:
         "--session-id",
         help="Optional stable coding-agent session ID; the raw value is never stored.",
     )
+    parser.add_argument("--json", action="store_true")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--check",
@@ -942,8 +1039,38 @@ def main(argv: list[str] | None = None) -> int:
         if args.check:
             cli = installed_cli_path(host)
             if cli is None:
+                payload = {
+                    "ok": False, "code": "setup_missing", "host": host,
+                    "message": "Palmate CLI is not installed for this host.",
+                }
+                if args.json:
+                    print(json.dumps(payload, sort_keys=True), flush=True)
+                else:
+                    print(payload["message"], file=sys.stderr, flush=True)
                 return 1
-            check_for_session_update(host, cli, session=args.session_id)
+            result = check_for_session_update(
+                host, cli, session=args.session_id, emit=not args.json,
+            )
+            if args.json:
+                print(json.dumps({
+                    "ok": True, "host": host, "cli": str(cli),
+                    "update_check": result,
+                }, sort_keys=True), flush=True)
+            return 0
+        if args.update:
+            try:
+                value = update_with_existing_credentials(
+                    host, session=args.session_id,
+                )
+            except AuthenticationRequired:
+                value = start_device_login(
+                    host,
+                    args.destination,
+                    session=args.session_id,
+                    update=True,
+                    open_browser=True,
+                )
+            _emit_login_state(value, as_json=args.json)
             return 0
         access, refresh = oauth_login(host)
         cli = download_cli(host, access, args.destination.expanduser())
@@ -963,6 +1090,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Palmate setup failed: {exc}", file=sys.stderr, flush=True)
         return 1
     action = "updated" if args.update else "installed"
+    if args.json:
+        print(json.dumps({
+            "ok": True, "host": host, "cli": str(cli), "action": action,
+        }, sort_keys=True), flush=True)
+        return 0
     print(f"Palmate is {action} and authenticated: {cli}", flush=True)
     if str(cli.parent) not in os.environ.get("PATH", "").split(os.pathsep):
         print(f"Add {cli.parent} to PATH, then retry the original Palmate action.", flush=True)

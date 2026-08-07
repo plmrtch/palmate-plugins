@@ -67,6 +67,96 @@ class SignatureVerificationTests(unittest.TestCase):
         self.assertFalse(bootstrap.verify_release_signature(digest, SIGNED_COMPLETE_CLI))
 
 
+class BootstrapMarkerTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="palmate-marker-test-")
+        self.root = Path(self.temporary.name)
+        self.environment = patch.dict(
+            os.environ, {"PALMATE_HOME": str(self.root / "state")}, clear=False,
+        )
+        self.environment.start()
+
+    def tearDown(self):
+        self.environment.stop()
+        self.temporary.cleanup()
+
+    def executable(self, name):
+        path = self.root / "bin" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"cli")
+        path.chmod(0o700)
+        return path
+
+    def test_marker_preserves_independent_cli_per_host(self):
+        first = self.executable("first")
+        second = self.executable("second")
+        bootstrap.save_marker("https://first.example", first)
+        bootstrap.save_marker("https://second.example", second)
+
+        self.assertEqual(
+            bootstrap.installed_cli_path("https://first.example"), first,
+        )
+        self.assertEqual(
+            bootstrap.installed_cli_path("https://second.example"), second,
+        )
+        marker = json.loads(bootstrap.marker_path().read_text(encoding="utf-8"))
+        self.assertEqual(marker["version"], 2)
+        self.assertEqual(set(marker["hosts"]), {
+            "https://first.example", "https://second.example",
+        })
+
+    def test_legacy_single_host_marker_migrates_without_loss(self):
+        first = self.executable("first")
+        second = self.executable("second")
+        path = bootstrap.marker_path()
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({
+            "host": "https://first.example", "cli": str(first),
+        }), encoding="utf-8")
+
+        bootstrap.save_marker("https://second.example", second)
+
+        self.assertEqual(
+            bootstrap.installed_cli_path("https://first.example"), first,
+        )
+        self.assertEqual(
+            bootstrap.installed_cli_path("https://second.example"), second,
+        )
+
+    def test_missing_check_has_actionable_human_and_json_output(self):
+        stderr = io.StringIO()
+        with patch("sys.stderr", stderr):
+            result = bootstrap.main([
+                "--host", "https://missing.example", "--check",
+            ])
+        self.assertEqual(result, 1)
+        self.assertIn("not installed for this host", stderr.getvalue())
+
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            result = bootstrap.main([
+                "--host", "https://missing.example", "--check", "--json",
+            ])
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            json.loads(stdout.getvalue())["code"], "setup_missing",
+        )
+
+    def test_corrupt_marker_fails_as_actionable_missing_setup(self):
+        path = bootstrap.marker_path()
+        path.parent.mkdir(parents=True)
+        path.write_text("{not-json", encoding="utf-8")
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            result = bootstrap.main([
+                "--host", "https://missing.example", "--check", "--json",
+            ])
+        self.assertEqual(result, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["code"], "setup_missing")
+        self.assertNotIn("not-json", stdout.getvalue())
+
+
 class SessionUpdateTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="palmate-plugin-test-")
@@ -404,6 +494,33 @@ class ResumableDeviceLoginTests(unittest.TestCase):
         self.assertEqual(stored["status"], "authorized")
         self.assertEqual(stored["access_token"], "access")
         request.assert_called_once()
+
+    def test_install_failure_becomes_terminal_after_bounded_attempts(self):
+        self.start()
+        with (
+            patch.object(
+                bootstrap,
+                "request_json_result",
+                return_value=(200, {"access_token": "access", "refresh_token": "refresh"}),
+            ),
+            patch.object(
+                bootstrap, "download_cli",
+                side_effect=bootstrap.BootstrapError("release unavailable"),
+            ),
+        ):
+            values = [
+                bootstrap.device_login_status(self.host, now=1005 + index)
+                for index in range(bootstrap.MAX_INSTALL_ATTEMPTS)
+            ]
+
+        self.assertEqual(values[-1]["status"], "error")
+        self.assertIn("failed after 3 attempts", values[-1]["last_error"])
+        state_text = bootstrap.login_state_path().read_text(encoding="utf-8")
+        stored = json.loads(state_text)["logins"][self.host]
+        self.assertNotIn("access_token", stored)
+        self.assertNotIn("refresh_token", stored)
+        self.assertNotIn("access", state_text)
+        self.assertNotIn("refresh", state_text)
 
 
 class AdapterParityTests(unittest.TestCase):
