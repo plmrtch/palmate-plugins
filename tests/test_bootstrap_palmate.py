@@ -16,6 +16,9 @@ CODEX_SKILL = ROOT / "codex" / "skills" / "palmate-setup"
 CLAUDE_SKILL = ROOT / "claude-code" / "skills" / "palmate-setup"
 CODEX_BOOTSTRAP = CODEX_SKILL / "scripts" / "bootstrap_palmate.py"
 CLAUDE_BOOTSTRAP = CLAUDE_SKILL / "scripts" / "bootstrap_palmate.py"
+CODEX_WORKFLOW = ROOT / "codex" / "skills" / "palmate-workflow"
+CLAUDE_WORKFLOW = ROOT / "claude-code" / "skills" / "palmate-workflow"
+DATES_REFERENCE = Path("references") / "dates-and-time-zones.md"
 SIGNED_COMPLETE_CLI = (
     "dzIFp9DPMXknK87j1r05bLWEGO11m9uOtBw/KwpudivI1SP+82L6ol8FYgA2hj+hu"
     "VejnxCY+1cIBdkU6yCwvPsaRRwB8+277IlImkLoorvMPpRw0WpQoPgT3TVyaRX34G"
@@ -542,6 +545,36 @@ class AdapterParityTests(unittest.TestCase):
 
     def test_codex_and_claude_bootstraps_are_identical(self):
         self.assertEqual(CODEX_BOOTSTRAP.read_bytes(), CLAUDE_BOOTSTRAP.read_bytes())
+
+    def test_workflow_date_references_are_identical_and_linked(self):
+        for skill in (CODEX_WORKFLOW, CLAUDE_WORKFLOW):
+            with self.subTest(skill=skill):
+                self.assertTrue((skill / DATES_REFERENCE).is_file())
+                self.assertIn(
+                    DATES_REFERENCE.as_posix(),
+                    (skill / "SKILL.md").read_text(encoding="utf-8"),
+                )
+        self.assertEqual(
+            (CODEX_WORKFLOW / DATES_REFERENCE).read_bytes(),
+            (CLAUDE_WORKFLOW / DATES_REFERENCE).read_bytes(),
+        )
+
+    def test_workflow_date_reference_names_the_runtime_contract(self):
+        text = (CLAUDE_WORKFLOW / DATES_REFERENCE).read_text(encoding="utf-8")
+        for name in (
+            "session.project_timezone",
+            "session.project_now()",
+            "session.local_day_range(day)",
+            "session.to_project_time(instant)",
+            "session.customer_timezone",
+            "session.to_customer_time(instant)",
+            "date_input",
+            "platform_created_at_unit",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(name, text)
+        # The low-code runtime cannot unpack a tuple, so a day is read by name.
+        self.assertIn("`.start` and `.end`", text)
 
 
 if __name__ == "__main__":
