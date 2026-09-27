@@ -1,13 +1,14 @@
 # Dates and time zones
 
 Read this before writing or reviewing Palmate low-code that reads, stores,
-compares, schedules, or prints a date or a time. It condenses the "Dates and
-time zones" section of the checkout guide, the `AGENTS.md` (identical to
-`CLAUDE.md`) at the root of every checkout, which the CLI package also ships
-in its `AGENTS.md` asset, and adds the runtime details the timezone release
-settled after that section was written. `builtins.py` in the checkout is the
-authority for exact runtime names and signatures; when it and this file
-differ, `builtins.py` wins.
+compares, schedules, or prints a date or a time. It is a condensed copy of
+the "Dates and time zones" section of the checkout guide, the `AGENTS.md`
+(identical to `CLAUDE.md`) at the root of every checkout, which the CLI
+package also ships in its `AGENTS.md` asset. The guide is the source: where
+the two differ, follow the guide. Only the last bullet, about the one-time
+refresh after the timezone release, belongs to the CLI workflow rather than
+the guide. `builtins.py` in the checkout is the authority for exact runtime
+names and signatures.
 
 - Store and compare instants; turn them into wall clocks only to show them,
   with the zone named. An instant is one point in time
