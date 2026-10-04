@@ -1,4 +1,4 @@
-<!-- Generated from shared/development-workflow.md; sha256:4a72485858bd091545ad2a75c34ad44e1856e5395eea7ecdd7addc6ce86e21b0 -->
+<!-- Generated from shared/development-workflow.md; sha256:b0b6e3c1644d17f120b084177271cd180f75310a02104c090eb6a25d300b4ed0 -->
 # Develop and improve an agent
 
 Instruction version: development-v1. These instructions support internal
@@ -150,3 +150,45 @@ the exact policy and binding remain valid. Observe the same attempt again after 
 transport failure; do not create a new test to clean up. A successful cleanup does
 not turn an UNKNOWN/FAILED test into passing evidence. Never supply guessed resource
 IDs, asserted client receipts or raw credentials to bypass this recovery flow.
+
+## Automations, templates and campaigns
+
+Use `palmate automation types` to discover the server's supported automation,
+trigger and webhook types. Cart/stock modules use this same interface; new-order
+behavior belongs in an event-driven/combined module with explicit event data.
+Author through `automation create/update/delete --project ROOT --branch NAME`,
+inspect the selected branch, and publish/merge through the normal governed flow.
+Activation and cron are separate runtime controls, outside authored revisions.
+
+Keep independent integration logic in utilities and test it with `develop run`
+mocked fixtures first. `automation test` gives guidance only; the old automation
+dry-run is not an isolated test. A real `automation trigger` or `schedule` needs
+an explicitly selected original `--project`, `--runtime`, and `--request-key`.
+Keep its returned run ID and exact request key/input; inspect `automation runs`
+and `automation run show` after a timeout. Cancel only a pending run through
+`automation run cancel` with its own stable request key. Cancellation cannot undo
+an already running effect. `enable/disable/cron` also require explicit runtime
+intent; periodic modules need a valid schedule before enabling.
+
+Use `automation vars setup` for the authenticated variable UI. Ask the user to
+verify/select the intended project there before entering a credential; the link
+opens the automation form and does not assert the dashboard's current selection.
+Read only configuration metadata with `automation vars list`. Do not place private
+values in files or commands, and never downgrade a secure variable to ordinary.
+
+For WhatsApp, inspect `palmate whatsapp --project ROOT capabilities` and
+`schema TOOL_NAME` before authoring the JSON arguments. Named commands expose
+`template`, `media`, `contacts`, `segments`, `recipients`, `campaign`, and
+`operation`. All action JSON uses `--data-file` with no project_id or credentials.
+Mutations require `--runtime` and manifest mutations require `--request-key`.
+Upload bounded private files through `media upload`, then use the returned file
+reference in media/recipient actions. An uncertain upload must be inspected, not
+automatically repeated; ingress has no idempotency-key contract.
+
+Create a campaign draft, prepare its immutable content/audience, inspect blockers,
+then send/schedule only when the user's authority covers those recipients and
+effects. Template submission does not imply Meta approval; operation success does
+not imply recipient delivery. Observe `operation show/wait` and campaign
+`status/progress` with the same IDs. On UNKNOWN preserve the reference and reconcile
+it; never resend with a new key. Local plugin coding identities and narrower MCP
+grants cannot bypass the server's runtime/operator permissions.
