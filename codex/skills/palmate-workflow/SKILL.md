@@ -22,6 +22,11 @@ and installation complete.
 - Inspect local state with `palmate status` and `palmate diff`.
 - Publish a complete change set with `palmate commit -m "..."`.
 - Test the selected synchronized server revision with `palmate test`.
+  `palmate test start` waits until the bot is ready;
+  `palmate test chat SESSION "text"` sends and waits for the whole turn;
+  `palmate scenarios run` defaults to concurrency 2, do not raise it; on
+  `cli_upgrade_required` run the palmate-setup update and retry; on
+  `test_paused` stop and report it.
 - Create a server-branch request with `palmate merge-request create`; target `main` by default.
 - Never approve a merge request from the agent or CLI. Owners/admins approve it in the Palmate admin UI.
 - Use the canonical project roots: `agents/`, `automations/`, `integrations/`, `livechat/`, `mcps/`, `product/`, `statistics/`, `tracebacks/`, and `settings/`.
