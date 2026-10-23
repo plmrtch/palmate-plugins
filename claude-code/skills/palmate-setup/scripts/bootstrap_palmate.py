@@ -26,6 +26,11 @@ import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Sent as `User-Agent: palmate-cli-bootstrap/<version>` so the device approval
+# page can show who asks to sign in. The server's CLI version gate only
+# matches `palmate-cli/<version>`, so it never refuses the bootstrap.
+# Keep it equal to the plugin version.
+BOOTSTRAP_VERSION = "0.6.0"
 CLIENT_ID = "palmate-cli-device"
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 MAX_JSON_BYTES = 64 * 1024
@@ -371,7 +376,10 @@ def request_json_result(
     token: str | None = None,
     form: dict[str, str] | None = None,
 ) -> tuple[int, dict]:
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": f"palmate-cli-bootstrap/{BOOTSTRAP_VERSION}",
+    }
     body = None
     if token:
         headers["Authorization"] = f"Bearer {token}"

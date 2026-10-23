@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -542,6 +543,97 @@ class AdapterParityTests(unittest.TestCase):
 
     def test_codex_and_claude_bootstraps_are_identical(self):
         self.assertEqual(CODEX_BOOTSTRAP.read_bytes(), CLAUDE_BOOTSTRAP.read_bytes())
+
+
+def load_variant(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class FakeJSONResponse(io.BytesIO):
+    def __init__(self, payload, status=200):
+        super().__init__(json.dumps(payload).encode())
+        self.status = status
+        self.headers = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+
+
+# Spec 124 / backend 058 P0 (contracts.md C9): the version gate answers 426 to
+# `palmate-cli/<v>` below CLI_MIN_VERSION. The bootstrap must identify itself
+# so the device page can show it, but never as a CLI the gate would refuse.
+CLI_GATE = r"^palmate-cli/(\d+)\.(\d+)\.(\d+)"
+WORKFLOW_TEST_LINE = (
+    "`palmate test start` waits until the bot is ready; `palmate test chat "
+    "SESSION \"text\"` sends and waits for the whole turn; `palmate scenarios "
+    "run` defaults to concurrency 2, do not raise it; on `cli_upgrade_required` "
+    "run the palmate-setup update and retry; on `test_paused` stop and report it."
+)
+
+
+class BootstrapUserAgentTests(unittest.TestCase):
+    def test_both_bootstraps_send_the_bootstrap_user_agent(self):
+        for path in (CODEX_BOOTSTRAP, CLAUDE_BOOTSTRAP):
+            variant = path.relative_to(ROOT).parts[0]
+            with self.subTest(variant=variant):
+                module = load_variant(
+                    path, "bootstrap_" + variant.replace("-", "_"),
+                )
+                with patch.object(
+                    module.OPENER, "open",
+                    return_value=FakeJSONResponse({"device_code": "x"}),
+                ) as opener_open:
+                    module.request_json_result(
+                        "https://palmate.test/api/palmate-cli/device/authorize/",
+                        form={"client_id": module.CLIENT_ID},
+                    )
+                request = opener_open.call_args.args[0]
+                self.assertEqual(
+                    request.get_header("User-agent"),
+                    f"palmate-cli-bootstrap/{module.BOOTSTRAP_VERSION}",
+                )
+                self.assertEqual(module.BOOTSTRAP_VERSION, "0.6.0")
+
+    def test_bootstrap_user_agent_never_matches_the_cli_gate(self):
+        module = load_variant(CODEX_BOOTSTRAP, "bootstrap_gate_probe")
+        user_agent = f"palmate-cli-bootstrap/{module.BOOTSTRAP_VERSION}"
+        self.assertIsNone(re.match(CLI_GATE, user_agent))
+        # The probe itself is sound: a CLI user agent does match.
+        self.assertIsNotNone(re.match(CLI_GATE, "palmate-cli/0.7.2"))
+
+
+class PluginReleaseTests(unittest.TestCase):
+    def test_both_variants_stay_identical(self):
+        self.assertEqual(CODEX_BOOTSTRAP.read_bytes(), CLAUDE_BOOTSTRAP.read_bytes())
+        for variant in ("codex", "claude-code"):
+            with self.subTest(variant=variant):
+                skill = ROOT / variant / "skills" / "palmate-workflow" / "SKILL.md"
+                text = " ".join(skill.read_text(encoding="utf-8").split())
+                self.assertIn(WORKFLOW_TEST_LINE, text)
+
+    def test_plugin_versions_are_0_6_0(self):
+        claude = json.loads(
+            (ROOT / "claude-code" / ".claude-plugin" / "plugin.json").read_text(),
+        )
+        marketplace = json.loads(
+            (ROOT / ".claude-plugin" / "marketplace.json").read_text(),
+        )
+        codex = json.loads(
+            (ROOT / "codex" / ".codex-plugin" / "plugin.json").read_text(),
+        )
+        self.assertEqual(claude["version"], "0.6.0")
+        self.assertEqual(
+            [plugin["version"] for plugin in marketplace["plugins"]], ["0.6.0"],
+        )
+        self.assertRegex(codex["version"], r"^0\.6\.0\+codex\.\d{14}$")
+        self.assertEqual(bootstrap.BOOTSTRAP_VERSION, "0.6.0")
 
 
 if __name__ == "__main__":

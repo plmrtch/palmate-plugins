@@ -1,6 +1,6 @@
 {
   "name": "palmate-agent",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "description": "Install, authenticate, and use Palmate for governed agent-development workflows.",
   "author": {
     "name": "Palmate"
