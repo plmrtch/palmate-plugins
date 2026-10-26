@@ -156,9 +156,9 @@ def save_marker(host: str, cli: Path) -> None:
     value = load_marker()
     hosts = _marker_hosts(value)
     hosts[host] = {"cli": str(cli)}
-    value.pop("host", None)
-    value.pop("cli", None)
-    value.update({"version": 2, "hosts": hosts})
+    # 0.5.x bootstraps read only the top-level pair, and profiles on one
+    # machine can run different plugin versions; `hosts` wins for 0.6+.
+    value.update({"version": 2, "hosts": hosts, "host": host, "cli": str(cli)})
     descriptor, temporary_name = tempfile.mkstemp(prefix=".plugin-bootstrap.", dir=path.parent)
     temporary = Path(temporary_name)
     try:

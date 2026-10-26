@@ -107,6 +107,25 @@ class BootstrapMarkerTests(unittest.TestCase):
             "https://first.example", "https://second.example",
         })
 
+    def test_marker_keeps_the_last_install_readable_by_legacy_bootstraps(self):
+        first = self.executable("first")
+        second = self.executable("second")
+        bootstrap.save_marker("https://first.example", first)
+        bootstrap.save_marker("https://second.example", second)
+
+        marker = json.loads(bootstrap.marker_path().read_text(encoding="utf-8"))
+        # 0.5.x reads only this pair; 0.6+ reads `hosts`.
+        self.assertEqual(
+            (marker["host"], marker["cli"]), ("https://second.example", str(second)),
+        )
+        self.assertEqual(marker["hosts"], {
+            "https://first.example": {"cli": str(first)},
+            "https://second.example": {"cli": str(second)},
+        })
+        self.assertEqual(
+            bootstrap.installed_cli_path("https://first.example"), first,
+        )
+
     def test_legacy_single_host_marker_migrates_without_loss(self):
         first = self.executable("first")
         second = self.executable("second")
