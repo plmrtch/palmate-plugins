@@ -30,7 +30,7 @@ from pathlib import Path
 # page can show who asks to sign in. The server's CLI version gate only
 # matches `palmate-cli/<version>`, so it never refuses the bootstrap.
 # Keep it equal to the plugin version.
-BOOTSTRAP_VERSION = "0.6.0"
+BOOTSTRAP_VERSION = "0.6.1"
 CLIENT_ID = "palmate-cli-device"
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 MAX_JSON_BYTES = 64 * 1024
@@ -70,6 +70,10 @@ SESSION_ENVIRONMENT_KEYS = (
 )
 MAX_RECORDED_SESSION_CHECKS = 32
 MAX_INSTALL_ATTEMPTS = 3
+# Windows cannot run the zipapp's `#!/usr/bin/env python3.12` line, so there the
+# signed artifact is `palmate.pyz` and the bootstrap writes a `palmate` (Git
+# Bash) and a `palmate.cmd` (cmd, PowerShell) launcher beside it.
+WINDOWS = os.name == "nt"
 
 
 class BootstrapError(Exception):
@@ -659,6 +663,7 @@ def _complete_device_login(state: dict, *, now: float) -> dict:
         destination = Path(state["destination"]).expanduser()
         cli = download_cli(state["host"], access, destination)
         persist_with_installed_cli(cli, state["host"], access, refresh)
+        cli = ensure_cli_layout(cli)
         save_marker(state["host"], cli)
         try:
             version, _ = installed_cli_identity(cli, state["host"])
@@ -766,6 +771,103 @@ def device_login_status(host: str, *, now: float | None = None) -> dict:
     return public_login_state(save_login_state(state), now=now)
 
 
+def cli_artifact_path(destination: Path) -> Path:
+    """Where the signed zipapp lives: unchanged on POSIX, `<name>.pyz` on Windows."""
+    if WINDOWS and destination.suffix != ".pyz":
+        return destination.with_name(destination.name + ".pyz")
+    return destination
+
+
+def ensure_cli_layout(cli: Path) -> Path:
+    """Return the zipapp path; on Windows also move an old install and write launchers."""
+    if not WINDOWS:
+        return cli
+    artifact = cli_artifact_path(cli)
+    if artifact != cli and not artifact.exists() and cli.is_file():
+        # Installed before 0.6.1 as `palmate`; keep the signed bytes.
+        os.replace(cli, artifact)
+    if artifact.is_file():
+        _write_launcher(artifact.with_name(artifact.stem), _sh_launcher(artifact))
+        _write_launcher(
+            artifact.with_name(artifact.stem + ".cmd"), _cmd_launcher(artifact),
+        )
+    return artifact
+
+
+def _sh_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def _sh_launcher(artifact: Path) -> bytes:
+    return (
+        "#!/bin/sh\n"
+        "# Written by the Palmate plugin bootstrap; runs the signed CLI beside it.\n"
+        "export PYTHONUTF8=1 PYTHONIOENCODING=utf-8\n"
+        f"PYTHON={_sh_quote(Path(sys.executable).as_posix())}\n"
+        f"CLI={_sh_quote(artifact.as_posix())}\n"
+        'if [ -f "$PYTHON" ]; then exec "$PYTHON" "$CLI" "$@"; fi\n'
+        'if command -v py >/dev/null 2>&1; then exec py -3 "$CLI" "$@"; fi\n'
+        'exec python "$CLI" "$@"\n'
+    ).encode("utf-8")
+
+
+def _cmd_launcher(artifact: Path) -> bytes:
+    # cmd parses batch files in the OEM code page, so only ASCII is embedded:
+    # the zipapp is found through %~dp0, and a non-ASCII interpreter path is
+    # left to the `py -3` and `python` fallbacks.
+    name = artifact.name.replace("%", "%%")
+    python = str(Path(sys.executable)).replace("%", "%%")
+    lines = [
+        "@echo off",
+        "setlocal",
+        'set "PYTHONUTF8=1"',
+        'set "PYTHONIOENCODING=utf-8"',
+        f'set "PALMATE_CLI=%~dp0{name}"',
+    ]
+    embed = python.isascii() and '"' not in python
+    if embed:
+        lines.append(f'if exist "{python}" goto interpreter')
+    lines += [
+        "where py >nul 2>nul",
+        "if not errorlevel 1 goto launcher",
+        'python "%PALMATE_CLI%" %*',
+        "exit /b %errorlevel%",
+    ]
+    if embed:
+        lines += [
+            ":interpreter",
+            f'"{python}" "%PALMATE_CLI%" %*',
+            "exit /b %errorlevel%",
+        ]
+    lines += [
+        ":launcher",
+        'py -3 "%PALMATE_CLI%" %*',
+        "exit /b %errorlevel%",
+    ]
+    # Labels need CRLF: with LF only, cmd can miss a `goto` target.
+    return ("\r\n".join(lines) + "\r\n").encode("ascii", "replace")
+
+
+def _write_launcher(path: Path, content: bytes) -> None:
+    try:
+        if path.read_bytes() == content:
+            return
+    except OSError:
+        pass
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(content)
+        os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def download_cli(
     host: str,
     access_token: str,
@@ -773,6 +875,7 @@ def download_cli(
     *,
     metadata: dict | None = None,
 ) -> Path:
+    destination = cli_artifact_path(destination)
     metadata = metadata or request_json(
         f"{host}/api/palmate-cli/release/", token=access_token
     )
@@ -887,7 +990,7 @@ def check_for_session_update(
         comparison = compare_semver(installed_version, remote_version)
         if comparison < 0:
             previous_version = installed_version
-            download_cli(host, token, cli, metadata=metadata)
+            cli = download_cli(host, token, cli, metadata=metadata)
             installed_version = remote_version
             if emit:
                 print(
@@ -930,11 +1033,12 @@ def update_with_existing_credentials(
         raise AuthenticationRequired(
             "Palmate CLI is not installed for this host"
         )
+    cli = ensure_cli_layout(cli)
     installed_version, token, metadata = installed_release_metadata(host, cli)
     remote_version = str(metadata.get("version", ""))
     comparison = compare_semver(installed_version, remote_version)
     if comparison < 0:
-        download_cli(host, token, cli, metadata=metadata)
+        cli = download_cli(host, token, cli, metadata=metadata)
         version = remote_version
         update_result = "updated"
     else:
@@ -1056,6 +1160,11 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     print(payload["message"], file=sys.stderr, flush=True)
                 return 1
+            artifact = ensure_cli_layout(cli)
+            if artifact != cli:
+                # An already-checked session returns before the marker is saved.
+                save_marker(host, artifact)
+                cli = artifact
             result = check_for_session_update(
                 host, cli, session=args.session_id, emit=not args.json,
             )
@@ -1083,6 +1192,7 @@ def main(argv: list[str] | None = None) -> int:
         access, refresh = oauth_login(host)
         cli = download_cli(host, access, args.destination.expanduser())
         persist_with_installed_cli(cli, host, access, refresh)
+        cli = ensure_cli_layout(cli)
         save_marker(host, cli)
         try:
             version, _ = installed_cli_identity(cli, host)

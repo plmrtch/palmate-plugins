@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -313,8 +314,11 @@ class BinaryReplacementTests(unittest.TestCase):
         self.destination.chmod(0o700)
         self.host = "https://api.palmate.ai"
         self.payload = b"new-signed-palmate-cli"
+        self.posix = patch.object(bootstrap, "WINDOWS", False)
+        self.posix.start()
 
     def tearDown(self):
+        self.posix.stop()
         self.temporary.cleanup()
 
     def metadata(self, *, digest: str | None = None) -> dict:
@@ -370,6 +374,144 @@ class BinaryReplacementTests(unittest.TestCase):
 
         self.assertEqual(self.destination.read_bytes(), b"known-good-cli")
         self.assertEqual(list(self.destination.parent.glob(".palmate.*")), [])
+
+
+class WindowsLayoutTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="palmate-windows-test-")
+        self.root = Path(self.temporary.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.artifact = self.bin / "palmate.pyz"
+        self.host = "https://api.palmate.ai"
+        self.payload = b"new-signed-palmate-cli"
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "PALMATE_HOME": str(self.root / "state"),
+                "CODEX_THREAD_ID": "windows-thread",
+                "CLAUDE_CODE_REMOTE_SESSION_ID": "",
+                "CLAUDE_CODE_SESSION_ID": "",
+                "CLAUDE_SESSION_ID": "",
+            },
+        )
+        self.environment.start()
+        self.windows = patch.object(bootstrap, "WINDOWS", True)
+        self.windows.start()
+
+    def tearDown(self):
+        self.windows.stop()
+        self.environment.stop()
+        self.temporary.cleanup()
+
+    def metadata(self, version: str = "1.3.0") -> dict:
+        return {
+            "download_url": f"{self.host}/api/palmate-cli/download/",
+            "version": version,
+            "sha256": hashlib.sha256(self.payload).hexdigest(),
+            "size": len(self.payload),
+            "algorithm": "sha256",
+            "signature": "test-signature",
+            "signature_algorithm": bootstrap.SIGNATURE_ALGORITHM,
+            "signing_key_id": bootstrap.SIGNING_KEY_ID,
+        }
+
+    def install(self) -> int:
+        with (
+            patch.object(bootstrap, "oauth_login", return_value=("access", "refresh")),
+            patch.object(bootstrap, "request_json", return_value=self.metadata()),
+            patch.object(
+                bootstrap.OPENER, "open", return_value=io.BytesIO(self.payload),
+            ),
+            patch.object(bootstrap, "verify_release_signature", return_value=True),
+            patch.object(bootstrap, "persist_with_installed_cli"),
+            patch.object(
+                bootstrap, "installed_cli_identity", return_value=("1.3.0", "access"),
+            ),
+            patch("sys.stdout", io.StringIO()),
+        ):
+            return bootstrap.main(
+                ["--host", self.host, "--destination", str(self.bin / "palmate")],
+            )
+
+    def check(self, remote_version: str):
+        stdout = io.StringIO()
+        with (
+            patch.object(
+                bootstrap,
+                "installed_release_metadata",
+                return_value=("1.2.3", "opaque-token", self.metadata(remote_version)),
+            ),
+            patch.object(
+                bootstrap.OPENER, "open", return_value=io.BytesIO(self.payload),
+            ) as opened,
+            patch.object(bootstrap, "verify_release_signature", return_value=True),
+            patch("sys.stdout", stdout),
+        ):
+            code = bootstrap.main(["--host", self.host, "--check", "--json"])
+        return code, json.loads(stdout.getvalue()), opened
+
+    def test_fresh_install_writes_the_zipapp_and_both_launchers(self):
+        self.assertEqual(self.install(), 0)
+
+        self.assertEqual(self.artifact.read_bytes(), self.payload)
+        self.assertEqual(bootstrap.installed_cli_path(self.host), self.artifact)
+        sh = (self.bin / "palmate").read_text(encoding="utf-8")
+        cmd = (self.bin / "palmate.cmd").read_bytes().decode("ascii")
+        self.assertTrue(sh.startswith("#!/bin/sh\n"))
+        self.assertIn(f"PYTHON='{Path(sys.executable).as_posix()}'", sh)
+        self.assertIn(f"CLI='{self.artifact.as_posix()}'", sh)
+        self.assertIn('set "PALMATE_CLI=%~dp0palmate.pyz"', cmd)
+        self.assertNotIn("\n", cmd.replace("\r\n", ""))
+        for launcher in (sh, cmd):
+            self.assertIn("PYTHONUTF8=1", launcher)
+            self.assertIn("PYTHONIOENCODING=utf-8", launcher)
+            self.assertIn("py -3", launcher)
+
+    def test_check_migrates_an_old_install_without_downloading(self):
+        old = self.bin / "palmate"
+        old.write_bytes(b"known-good-cli")
+        old.chmod(0o700)
+        bootstrap.save_marker(self.host, old)
+        # The session was already checked, so the update check returns early.
+        bootstrap.record_session_check(
+            self.host, old, bootstrap.current_agent_session(), "1.2.3",
+        )
+
+        code, payload, opened = self.check("1.3.0")
+
+        self.assertEqual((code, payload["update_check"]), (0, "already_checked"))
+        opened.assert_not_called()
+        self.assertEqual(self.artifact.read_bytes(), b"known-good-cli")
+        self.assertTrue(old.read_bytes().startswith(b"#!/bin/sh\n"))
+        self.assertTrue((self.bin / "palmate.cmd").is_file())
+        self.assertEqual(payload["cli"], str(self.artifact))
+        self.assertEqual(bootstrap.installed_cli_path(self.host), self.artifact)
+        code, payload, _ = self.check("1.3.0")
+        self.assertEqual((code, payload["cli"]), (0, str(self.artifact)))
+
+    def test_check_that_updates_keeps_the_zipapp_in_the_marker(self):
+        self.artifact.write_bytes(b"known-good-cli")
+        self.artifact.chmod(0o700)
+        bootstrap.save_marker(self.host, self.artifact)
+
+        code, payload, opened = self.check("1.3.0")
+
+        self.assertEqual((code, payload["update_check"]), (0, "updated"))
+        opened.assert_called_once()
+        self.assertEqual(self.artifact.read_bytes(), self.payload)
+        self.assertEqual(bootstrap.installed_cli_path(self.host), self.artifact)
+        self.assertTrue((self.bin / "palmate").is_file())
+
+    def test_posix_paths_are_unchanged_and_no_launchers_are_written(self):
+        with patch.object(bootstrap, "WINDOWS", False):
+            self.assertEqual(self.install(), 0)
+
+        cli = self.bin / "palmate"
+        self.assertEqual(cli.read_bytes(), self.payload)
+        self.assertEqual(bootstrap.installed_cli_path(self.host), cli)
+        self.assertFalse(self.artifact.exists())
+        self.assertFalse((self.bin / "palmate.cmd").exists())
 
 
 class ResumableDeviceLoginTests(unittest.TestCase):
@@ -599,7 +741,7 @@ class BootstrapUserAgentTests(unittest.TestCase):
                     request.get_header("User-agent"),
                     f"palmate-cli-bootstrap/{module.BOOTSTRAP_VERSION}",
                 )
-                self.assertEqual(module.BOOTSTRAP_VERSION, "0.6.0")
+                self.assertEqual(module.BOOTSTRAP_VERSION, "0.6.1")
 
     def test_bootstrap_user_agent_never_matches_the_cli_gate(self):
         module = load_variant(CODEX_BOOTSTRAP, "bootstrap_gate_probe")
@@ -618,7 +760,7 @@ class PluginReleaseTests(unittest.TestCase):
                 text = " ".join(skill.read_text(encoding="utf-8").split())
                 self.assertIn(WORKFLOW_TEST_LINE, text)
 
-    def test_plugin_versions_are_0_6_0(self):
+    def test_plugin_versions_are_0_6_1(self):
         claude = json.loads(
             (ROOT / "claude-code" / ".claude-plugin" / "plugin.json").read_text(),
         )
@@ -628,12 +770,12 @@ class PluginReleaseTests(unittest.TestCase):
         codex = json.loads(
             (ROOT / "codex" / ".codex-plugin" / "plugin.json").read_text(),
         )
-        self.assertEqual(claude["version"], "0.6.0")
+        self.assertEqual(claude["version"], "0.6.1")
         self.assertEqual(
-            [plugin["version"] for plugin in marketplace["plugins"]], ["0.6.0"],
+            [plugin["version"] for plugin in marketplace["plugins"]], ["0.6.1"],
         )
-        self.assertRegex(codex["version"], r"^0\.6\.0\+codex\.\d{14}$")
-        self.assertEqual(bootstrap.BOOTSTRAP_VERSION, "0.6.0")
+        self.assertRegex(codex["version"], r"^0\.6\.1\+codex\.\d{14}$")
+        self.assertEqual(bootstrap.BOOTSTRAP_VERSION, "0.6.1")
 
 
 if __name__ == "__main__":
